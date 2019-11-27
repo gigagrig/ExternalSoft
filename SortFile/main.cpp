@@ -13,6 +13,10 @@
 
 using namespace std;
 
+const char* intputFile = "INPUT";
+const char* outputFile = "OUTPUT";
+
+
 /// Possible exception on sorting process
 class SortAlgException : exception {
 public:
@@ -46,7 +50,6 @@ UniqueFileHandler makeUniqueHandler(const char* fileName, const char* mode)
 
 
 namespace  {
-
 mutex inputMutex; // mutex for reading from input file
 atomic_bool isFileRead; // flag, that indicates whether input file was read
 atomic_int segmentsCount; // count of read and sorted segments from input
@@ -81,7 +84,7 @@ void sortingSegmentWorker(T* buffer, size_t bufferSize, FILE* input)
                 return;
             }
 
-            sort(buffer, buffer + bufferSize);
+            sort(buffer, buffer + readCount);
             string chunkName = genUniqueFilename();
             auto output = makeUniqueHandler(chunkName.c_str(), "wb+");
             if (!output) {
@@ -131,7 +134,7 @@ void generateSortedSegments(T* sortingBuffer, size_t bufferSize, FILE* input)
         if (readCount == 0) {
             return;
         }
-        sort(sortingBuffer, sortingBuffer + bufferSize);
+        sort(sortingBuffer, sortingBuffer + readCount);
         cout << "chunk " << ++chunk << " sorted\n";
         const char *chunkName =  tmpnam(0);
         auto output = makeUniqueHandler(chunkName, "wb+");
@@ -175,6 +178,7 @@ void mergeSortedFilesPair(const string& file1, const string& file2, const string
         }
     }
 
+    // writing the remaining data in another stream
     nextIdx = (nextIdx + 1) % 2;
     fwrite(vals + nextIdx, sizeof(T), 1, outDesc);
     while (0 < fread(vals + nextIdx, sizeof(T), 1, descriptors[nextIdx])) {
@@ -286,7 +290,7 @@ void mergeSortedFileWork(int targetLevel)
             if (nextLevel == targetLevel) {
                 merged.store(true);
             }
-            resFile = nextLevel < targetLevel ? string(tmpnam(0)) : string("OUTPUT");
+            resFile = nextLevel < targetLevel ? string(tmpnam(0)) : string(outputFile);
             mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
 
             queue.lock();
@@ -346,7 +350,6 @@ void mergeSegmentsParallel()
 template<typename T>
 void mergeSegmentsByPairs()
 {
-    int targetLevel = ceil(log2(sortedSegments.size()));
     while (sortedSegments.size() > 1) {
         sortedSegment f1(sortedSegments.front());
         sortedSegments.pop();
@@ -354,7 +357,7 @@ void mergeSegmentsByPairs()
         sortedSegments.pop();
         string resFile;
         int nextLevel = max(f1.level, f2.level) + 1;
-        resFile = nextLevel < targetLevel ? string(tmpnam(0)) : string("OUTPUT");
+        resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string("OUTPUT");
         mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
         sortedSegments.push(sortedSegment{resFile, nextLevel});
         remove(f1.filename.c_str());
@@ -377,7 +380,7 @@ void mergeSegmentsDirectly(char* buffer, size_t bufSize)
         }
         string resFile;
         //int nextLevel = max(f1.level, f2.level) + 1;
-        resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string("OUTPUT");
+        resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string(outputFile);
         mergeSortedFiles<T>(files, resFile, buffer, bufSize);
         sortedSegments.push(sortedSegment{resFile, 0});
         for (size_t i = 0; i < files.size(); ++i) {
@@ -445,8 +448,6 @@ unique_ptr<char[]> allocateMaxBuffer(size_t maxSize, size_t minSize, size_t* siz
 
 int main()
 {
-    const char* intputFile = "empty.bin";
-
     try {
 
         chrono::steady_clock::time_point start = chrono::steady_clock::now();
@@ -460,32 +461,32 @@ int main()
 
         size_t bufSize;
         constexpr int kMegabyte = 1024 * 1024;
-        unique_ptr<char[]> buf = allocateMaxBuffer(256*kMegabyte, 4*kMegabyte, &bufSize);
+        unique_ptr<char[]> buf = allocateMaxBuffer(120*kMegabyte, 4*kMegabyte, &bufSize);
         if (!buf) {
             cout << "Not enough RAM to sort file.\n";
             return 2;
         }
         cout << bufSize << " bytes allocated for buffer\n";
 
-        // Sort file in buffer if it fits
         fseeko64(input.get(), 0, SEEK_END);
         size_t inputSize = ftello64(input.get());
         inputSize = (inputSize / sizeof(uint32_t)) * sizeof(uint32_t);
         rewind(input.get());
-        if (inputSize <= bufSize) {
+        if (inputSize <= bufSize) { // Sort file in buffer if it fits
             cout << "Sorting directly to result file\n";
             fread(buf.get(), 1, inputSize, input.get());
             uint32_t* sortingBuf = reinterpret_cast<uint32_t*>(buf.get());
             sort(sortingBuf, sortingBuf + inputSize / sizeof(uint32_t));
-            auto output = makeUniqueHandler("OUTPUT", "wb+");
+            auto output = makeUniqueHandler(outputFile, "wb+");
             if (!output) {
                 cout << "Failed to open result file\n";
                 return 4;
             }
             fwrite(sortingBuf, 1, inputSize, output.get());
         } else {
-            //generateSortedSegments(reinterpret_cast<uint32_t*>(buf.get()), bufSize / sizeof(uint32_t), input.get());
-            generateSortedSegmentsParallel(reinterpret_cast<uint32_t*>(buf.get()), bufSize / sizeof(uint32_t), input.get());
+            generateSortedSegmentsParallel(reinterpret_cast<uint32_t*>(buf.get()),
+                                           bufSize / sizeof(uint32_t),
+                                           input.get());
         }
 
 
@@ -497,9 +498,7 @@ int main()
 
         //merging
         start = chrono::steady_clock::now();
-        //mergeSegmentsByPairs<uint32_t>();
         mergeSegmentsParallel<uint32_t>();
-        //mergeSegmentsDirectly<uint32_t>(buf.get(), bufSize);
 
         chrono::steady_clock::time_point endMerge = chrono::steady_clock::now();
 
@@ -516,7 +515,7 @@ int main()
         return 3;
     }
 
-    cout << "OUTPUT" << " sorted " << (checkIsSorted<uint32_t>("OUTPUT") ? "true" : "false") << endl;
+    cout << outputFile << " sorted " << (checkIsSorted<uint32_t>(outputFile) ? "true" : "false") << endl;
 
     return 0;
 }
