@@ -15,12 +15,13 @@ constexpr size_t kSizeOfBuf = 1024 * 1024 * 8 * 2; // 8*8 = 256 мб.
 
 using namespace std;
 
+/// Possible exceptions on sorting process
 class SortAlgException : exception {
 public:
-    SortAlgException(const char* what) : exception() {
-        m_what = string(what);
+    SortAlgException(const string& what) : exception() {
+        m_what = what;
     }
-    const char * what() const noexcept override { return m_what.c_str(); }
+    const char* what() const noexcept override { return m_what.c_str(); }
 private:
     string m_what;
 };
@@ -41,6 +42,68 @@ UniqueFileHandler makeUnique(const char* fileName, const char* mode)
             cout << fileName << " closed\n";
             fclose(f);
         });
+}
+
+
+mutex inputMutex;
+atomic_bool isFileRead;
+atomic_int segmentsCount;
+static exception_ptr segSortEx = nullptr;
+atomic_bool merged;
+mutex queeMutex;
+
+
+void sortingSegmentWorker(uint32_t* buffer, int bufferSize, FILE* input)
+{
+    segmentsCount.store(0);
+    try {
+        unique_lock<mutex> inp(inputMutex, defer_lock);
+        unique_lock<mutex> quee(inputMutex, defer_lock);
+        while (!isFileRead.load())
+        {
+            inp.lock();
+            size_t readCount = fread(buffer, sizeof(uint32_t), bufferSize, input);
+            inp.unlock();
+            if (readCount == 0) {
+                isFileRead.store(true);
+                return;
+            }
+
+            sort(buffer, buffer + bufferSize);
+            const char *chunkName =  tmpnam(0);
+            auto output = makeUnique(chunkName, "wb+");
+            if (!output) {
+                throw SortAlgException("Failed to create temporary file while sorting segments."); //
+            }
+            fwrite(buffer, sizeof(uint32_t), readCount, output.get());
+            quee.lock();
+            sortedFiles.push({string(chunkName), 0});
+            cout << "chunk " << segmentsCount.fetch_add(1) + 1 << " sorted\n";
+            quee.unlock();
+        }
+    }
+    catch(...) {
+        isFileRead.store(true);
+        segSortEx = current_exception();
+    }
+
+}
+
+void generateSortedSegmentsParallel(uint32_t* sortingBuffer, int bufferSize, FILE* input) {
+
+    constexpr int kWorkersCount = 4;
+    thread sortWorkers[kWorkersCount];
+    isFileRead.store(false);
+    const int  workerBufSize = bufferSize / kWorkersCount;
+    for (int i = 0; i < kWorkersCount; ++i)
+        sortWorkers[i] = thread(sortingSegmentWorker, sortingBuffer + i*workerBufSize, workerBufSize, input);
+    for (int i = 0; i < kWorkersCount; ++i)
+        if (sortWorkers[i].joinable())
+            sortWorkers[i].join();
+
+    if (segSortEx) {
+        rethrow_exception(segSortEx);
+    }
 }
 
 
@@ -73,16 +136,10 @@ void mergeSortedFilesPair(const string& file1, const string& file2, const string
         throw SortAlgException("Failed to read temporary file while merging");
     auto output = makeUnique(resultName.c_str(), "wb+");
 
-    constexpr size_t kBufSize = 64*1024;
-    //setvbuf(f1.get(), 0, _IOFBF, kBufSize);
-    //setvbuf(f2.get(), 0, _IOFBF, kBufSize);
-
-
     FILE* outDesc = output.get();
     if (!output) {
         throw SortAlgException("Failed to create temporary file while merging");
     }
-    //setvbuf(outDesc, 0, _IOFBF, kBufSize);
 
     uint32_t vals[2];
     FILE* descriptors[2] {f1.get(), f2.get()};
@@ -108,7 +165,7 @@ void mergeSortedFilesPair(const string& file1, const string& file2, const string
     }
 }
 
-constexpr size_t kBufSize = 64*1024*1024;
+constexpr size_t kBufSize = 64*1024;
 
 template<class T> class MinStream
 {
@@ -179,10 +236,6 @@ void mergeSortedFiles(const vector<string>& files, const string& resultName)
         fwrite(&val, sizeof(T), 1, outDesc);
     }
 }
-
-
-atomic_bool merged;
-mutex queeMutex;
 
 
 void mergeSortedFileWork(int targetLevel)
@@ -292,7 +345,7 @@ int main()
 {
     cout << "Hello Artec!" << endl;
 
-    const char* intputFile = "INPUT2";
+    const char* intputFile = "INPUT";
 
     try {
 
@@ -312,22 +365,24 @@ int main()
         if (!p)
             throw bad_alloc();
 
-        generateSortedSegments(p.get(), kSizeOfBuf, input.get());
+        //generateSortedSegments(p.get(), kSizeOfBuf, input.get());
+        generateSortedSegmentsParallel(p.get(), kSizeOfBuf, input.get());
 
         chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
 
-        cout << "Sorting took "
-                  << std::chrono::duration_cast<chrono::milliseconds>(endSort - start).count()
-                  << "ms.\n";
+        auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
 
         //merging
         start = chrono::steady_clock::now();
         //mergeSegmentsByPairs();
-        //mergeSegmentsParallel();
-        mergeSegmentsDirectly();
+        mergeSegmentsParallel();
+        //mergeSegmentsDirectly();
 
         chrono::steady_clock::time_point endMerge = chrono::steady_clock::now();
 
+        cout << "Sorting took "
+                  << sortDurationMs
+                  << "ms.\n";
         cout << "Merging took "
                   << std::chrono::duration_cast<chrono::milliseconds>(endMerge - start).count()
                   << "ms.\n";
