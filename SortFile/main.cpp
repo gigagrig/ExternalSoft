@@ -59,7 +59,9 @@ string genUniqueFilename() {
     return string(nameBuf);
 }
 
-void sortingSegmentWorker(uint32_t* buffer, int bufferSize, FILE* input)
+
+template<typename T>
+void sortingSegmentWorker(T* buffer, int bufferSize, FILE* input)
 {
     segmentsCount.store(0);
     try {
@@ -68,7 +70,7 @@ void sortingSegmentWorker(uint32_t* buffer, int bufferSize, FILE* input)
         while (!isFileRead.load())
         {
             inp.lock();
-            size_t readCount = fread(buffer, sizeof(uint32_t), bufferSize, input);
+            size_t readCount = fread(buffer, sizeof(T), bufferSize, input);
             inp.unlock();
             if (readCount == 0) {
                 isFileRead.store(true);
@@ -81,7 +83,7 @@ void sortingSegmentWorker(uint32_t* buffer, int bufferSize, FILE* input)
             if (!output) {
                 throw SortAlgException("Failed to create temporary file while sorting segments.");
             }
-            fwrite(buffer, sizeof(uint32_t), readCount, output.get());
+            fwrite(buffer, sizeof(T), readCount, output.get());
             quee.lock();
             sortedFiles.push({string(chunkName), 0});
             cout << "chunk " << segmentsCount.fetch_add(1) + 1 << " sorted\n";
@@ -95,14 +97,15 @@ void sortingSegmentWorker(uint32_t* buffer, int bufferSize, FILE* input)
 
 }
 
-void generateSortedSegmentsParallel(uint32_t* sortingBuffer, int bufferSize, FILE* input) {
+template<typename T>
+void generateSortedSegmentsParallel(T* sortingBuffer, int bufferSize, FILE* input) {
 
     constexpr int kWorkersCount = 4;
     thread sortWorkers[kWorkersCount];
     isFileRead.store(false);
     const int  workerBufSize = bufferSize / kWorkersCount;
     for (int i = 0; i < kWorkersCount; ++i)
-        sortWorkers[i] = thread(sortingSegmentWorker, sortingBuffer + i*workerBufSize, workerBufSize, input);
+        sortWorkers[i] = thread(sortingSegmentWorker<T>, sortingBuffer + i*workerBufSize, workerBufSize, input);
     for (int i = 0; i < kWorkersCount; ++i)
         if (sortWorkers[i].joinable())
             sortWorkers[i].join();
@@ -113,11 +116,12 @@ void generateSortedSegmentsParallel(uint32_t* sortingBuffer, int bufferSize, FIL
 }
 
 
-void generateSortedSegments(uint32_t* sortingBuffer, int bufferSize, FILE* input)
+template<typename T>
+void generateSortedSegments(T* sortingBuffer, int bufferSize, FILE* input)
 {
     int chunk = 0;
     while(!feof(input)) {
-        size_t readCount = fread(sortingBuffer, sizeof(uint32_t), bufferSize, input);
+        size_t readCount = fread(sortingBuffer, sizeof(T), bufferSize, input);
         if (readCount == 0) {
             return;
         }
@@ -128,11 +132,12 @@ void generateSortedSegments(uint32_t* sortingBuffer, int bufferSize, FILE* input
         if (!output) {
             throw SortAlgException("Failed to create temporary file while sorting segments."); //
         }
-        fwrite(sortingBuffer, sizeof(uint32_t),  readCount, output.get());
+        fwrite(sortingBuffer, sizeof(T),  readCount, output.get());
         sortedFiles.push({string(chunkName), 0});
     }
 }
 
+template<typename T>
 void mergeSortedFilesPair(const string& file1, const string& file2, const string& resultName)
 {
     cout << "Merging " << file1 << " and " << file2 << " to " << resultName << "\n";
@@ -147,27 +152,27 @@ void mergeSortedFilesPair(const string& file1, const string& file2, const string
         throw SortAlgException("Failed to create temporary file while merging");
     }
 
-    uint32_t vals[2];
+    T vals[2];
     FILE* descriptors[2] {f1.get(), f2.get()};
-    fread(vals, sizeof(uint32_t), 1, descriptors[0]);
-    fread(vals+1, sizeof(uint32_t), 1, descriptors[1]);
+    fread(vals, sizeof(T), 1, descriptors[0]);
+    fread(vals+1, sizeof(T), 1, descriptors[1]);
 
     unsigned nextIdx = 0;
     for(;;) {
         nextIdx = 0;
         if (vals[1] < vals[0])
             nextIdx = 1;
-        fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
-        size_t read = fread(vals + nextIdx, sizeof(uint32_t), 1, descriptors[nextIdx]);
+        fwrite(vals + nextIdx, sizeof(T), 1, outDesc);
+        size_t read = fread(vals + nextIdx, sizeof(T), 1, descriptors[nextIdx]);
         if (read == 0) {
             break;
         }
     }
 
     nextIdx = (nextIdx + 1) % 2;
-    fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
-    while (0 < fread(vals + nextIdx, sizeof(uint32_t), 1, descriptors[nextIdx])) {
-        fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
+    fwrite(vals + nextIdx, sizeof(T), 1, outDesc);
+    while (0 < fread(vals + nextIdx, sizeof(T), 1, descriptors[nextIdx])) {
+        fwrite(vals + nextIdx, sizeof(T), 1, outDesc);
     }
 }
 
@@ -244,6 +249,7 @@ void mergeSortedFiles(const vector<string>& files, const string& resultName)
 }
 
 
+template<typename T>
 void mergeSortedFileWork(int targetLevel)
 {
     try {
@@ -270,7 +276,7 @@ void mergeSortedFileWork(int targetLevel)
                 merged.store(true);
             }
             resFile = nextLevel < targetLevel ? string(tmpnam(0)) : string("OUTPUT");
-            mergeSortedFilesPair(f1.filename, f2.filename, resFile);
+            mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
 
             l.lock();
             sortedFiles.push(sortedSegment{resFile, nextLevel});
@@ -299,6 +305,7 @@ void mergeSortedFileWork(int targetLevel)
     cout << "Thread " << this_thread::get_id() << " finished\n";
 }
 
+template<typename T>
 void mergeSegmentsParallel()
 {
     int targetLevel = ceil(log2(sortedFiles.size()));
@@ -306,7 +313,7 @@ void mergeSegmentsParallel()
     thread mergePool[kPoolSize];
     merged.store(false);
     for (int i = 0; i < kPoolSize; ++i)
-        mergePool[i] = thread(mergeSortedFileWork, targetLevel);
+        mergePool[i] = thread(mergeSortedFileWork<T>, targetLevel);
     for (int i = 0; i < kPoolSize; ++i)
         if (mergePool[i].joinable())
             mergePool[i].join();
@@ -317,6 +324,7 @@ void mergeSegmentsParallel()
 }
 
 
+template<typename T>
 void mergeSegmentsByPairs()
 {
     int targetLevel = ceil(log2(sortedFiles.size()));
@@ -328,13 +336,14 @@ void mergeSegmentsByPairs()
         string resFile;
         int nextLevel = max(f1.level, f2.level) + 1;
         resFile = nextLevel < targetLevel ? string(tmpnam(0)) : string("OUTPUT");
-        mergeSortedFilesPair(f1.filename, f2.filename, resFile);
+        mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
         sortedFiles.push(sortedSegment{resFile, nextLevel});
         remove(f1.filename.c_str());
         remove(f2.filename.c_str());
     }
 }
 
+template<typename T>
 void mergeSegmentsDirectly()
 {
     const size_t kMaxOpenFilesCount = 64;
@@ -350,7 +359,7 @@ void mergeSegmentsDirectly()
         string resFile;
         //int nextLevel = max(f1.level, f2.level) + 1;
         resFile = sortedFiles.size() > 0 ? string(tmpnam(0)) : string("OUTPUT");
-        mergeSortedFiles<uint32_t>(files, resFile);
+        mergeSortedFiles<T>(files, resFile);
         sortedFiles.push(sortedSegment{resFile, 0});
         for (size_t i = 0; i < files.size(); ++i) {
             remove(files[i].c_str());
@@ -368,6 +377,30 @@ void clearTempFiles()
     }
 }
 
+template<typename T>
+bool checkIsSorted(const char* filename)
+{
+    unique_ptr<FILE,  function<void(FILE*)>> input = makeUnique(filename, "rb");
+    if (!input) {
+        cout << "Failed to open file " << filename << endl;
+        return false;
+    }
+    FILE* inputRaw = input.get();
+    T current;
+    if (0 == fread(&current, sizeof(T), 1, inputRaw)) {
+        return true;
+    }
+    T next;
+    while(true) {
+        if (0 == fread(&next, sizeof(T), 1, inputRaw)) {
+            return true;
+        }
+        if (next < current)
+            return false;
+        current = next;
+    }
+}
+
 
 int main()
 {
@@ -379,10 +412,8 @@ int main()
 
         chrono::steady_clock::time_point start = chrono::steady_clock::now();
 
-        unique_ptr<FILE,  function<void(FILE*)>> input(fopen(intputFile, "rb"), [](FILE* f)
-        {
-            fclose(f);
-        });
+        unique_ptr<FILE,  function<void(FILE*)>> input = makeUnique(intputFile, "rb");
+
         if (!input) {
             cerr << "Failed top open INPUT file.\n";
             return 1;
@@ -395,6 +426,7 @@ int main()
 
         //generateSortedSegments(p.get(), kSizeOfBuf, input.get());
         generateSortedSegmentsParallel(p.get(), kSizeOfBuf, input.get());
+        input.reset(); // closing input file
 
         chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
 
@@ -402,9 +434,9 @@ int main()
 
         //merging
         start = chrono::steady_clock::now();
-        //mergeSegmentsByPairs();
-        //mergeSegmentsParallel();
-        mergeSegmentsDirectly();
+        //mergeSegmentsByPairs<uint32_t>();
+        mergeSegmentsParallel<uint32_t>();
+        //mergeSegmentsDirectly<uint32_t>();
 
         chrono::steady_clock::time_point endMerge = chrono::steady_clock::now();
 
@@ -421,6 +453,7 @@ int main()
         exit(1);
     }
 
+    cout << "OUTPUT" << " sorted " << (checkIsSorted<uint32_t>("OUTPUT") ? "true" : "false") << endl;
 
     return 0;
 }
