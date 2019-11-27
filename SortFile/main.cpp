@@ -11,7 +11,7 @@
 #include <queue>
 
 
-constexpr size_t kSizeOfBuf = 1024 * 1024 * 8 * 2; // 8*8 = 256 мб.
+constexpr size_t kSizeOfBuf = 1024 * 1024 * 8 / 2; // 8*8 = 256 мб.
 
 using namespace std;
 
@@ -37,7 +37,7 @@ queue<sortedSegment> sortedFiles;
 typedef unique_ptr<FILE,  function<void(FILE*)>> UniqueFileHandler;
 UniqueFileHandler makeUnique(const char* fileName, const char* mode)
 {
-    return unique_ptr<FILE,  function<void(FILE*)>>(fopen(fileName, mode), [fileName](FILE* f)
+    return unique_ptr<FILE, function<void(FILE*)>>(fopen(fileName, mode), [fileName](FILE* f)
         {
             cout << fileName << " closed\n";
             fclose(f);
@@ -49,9 +49,15 @@ mutex inputMutex;
 atomic_bool isFileRead;
 atomic_int segmentsCount;
 static exception_ptr segSortEx = nullptr;
+static exception_ptr segMergeEx = nullptr;
 atomic_bool merged;
 mutex queeMutex;
 
+string genUniqueFilename() {
+    char nameBuf[L_tmpnam];
+    tmpnam(nameBuf);
+    return string(nameBuf);
+}
 
 void sortingSegmentWorker(uint32_t* buffer, int bufferSize, FILE* input)
 {
@@ -70,10 +76,10 @@ void sortingSegmentWorker(uint32_t* buffer, int bufferSize, FILE* input)
             }
 
             sort(buffer, buffer + bufferSize);
-            const char *chunkName =  tmpnam(0);
-            auto output = makeUnique(chunkName, "wb+");
+            string chunkName = genUniqueFilename();
+            auto output = makeUnique(chunkName.c_str(), "wb+");
             if (!output) {
-                throw SortAlgException("Failed to create temporary file while sorting segments."); //
+                throw SortAlgException("Failed to create temporary file while sorting segments.");
             }
             fwrite(buffer, sizeof(uint32_t), readCount, output.get());
             quee.lock();
@@ -228,7 +234,7 @@ void mergeSortedFiles(const vector<string>& files, const string& resultName)
         throw SortAlgException("Failed to create temporary file for merging");
     }
 
-    int a = setvbuf(outDesc, outBuf.get(), _IOFBF, kBufSize);
+    setvbuf(outDesc, outBuf.get(), _IOFBF, kBufSize);
 
     cout << "memory allocated\n";
     while (valuesStream.openStreamsCount() > 0) {
@@ -240,10 +246,12 @@ void mergeSortedFiles(const vector<string>& files, const string& resultName)
 
 void mergeSortedFileWork(int targetLevel)
 {
-    while(!merged.load()) {
-        sortedSegment f1;
-        sortedSegment f2;
-        {
+    try {
+        while(!merged.load()) {
+
+            // fetching next files to merge
+            sortedSegment f1;
+            sortedSegment f2;
             unique_lock<mutex> l(queeMutex, defer_lock);
             l.lock();
             if (sortedFiles.size() < 2) {
@@ -253,23 +261,40 @@ void mergeSortedFileWork(int targetLevel)
             sortedFiles.pop();
             f2 = sortedFiles.front();
             sortedFiles.pop();
-        }
-        string resFile;
-        int nextLevel = max(f1.level, f2.level) + 1;
-        if (nextLevel == targetLevel) {
-            merged.store(true);
-        }
-        resFile = nextLevel < targetLevel ? string(tmpnam(0)) : string("OUTPUT");
-        mergeSortedFilesPair(f1.filename, f2.filename, resFile);
-        {
-            lock_guard<mutex> l(queeMutex);
+            l.unlock();
+
+            // merging to resfile
+            string resFile;
+            int nextLevel = max(f1.level, f2.level) + 1;
+            if (nextLevel == targetLevel) {
+                merged.store(true);
+            }
+            resFile = nextLevel < targetLevel ? string(tmpnam(0)) : string("OUTPUT");
+            mergeSortedFilesPair(f1.filename, f2.filename, resFile);
+
+            l.lock();
             sortedFiles.push(sortedSegment{resFile, nextLevel});
+            l.unlock();
+
+            // removing temp files
+            if (0 != remove(f1.filename.c_str())) {
+                cout << "FAILED TO REMOVE FILE " << f1.filename << endl;
+            }
+            if (0 != remove(f2.filename.c_str())) {
+                cout << "FAILED TO REMOVE FILE " << f2.filename << endl;
+            }
+
+            if (nextLevel == targetLevel) {
+                break;
+            }
         }
-        remove(f1.filename.c_str());
-        remove(f2.filename.c_str());
-        if (nextLevel == targetLevel) {
-            break;
-        }
+    }
+    catch(...)
+    {
+        merged.store(true);
+        segMergeEx = current_exception();
+        cout << "Thread " << this_thread::get_id() << " throwed exception\n";
+        rethrow_exception(segMergeEx);
     }
     cout << "Thread " << this_thread::get_id() << " finished\n";
 }
@@ -285,6 +310,9 @@ void mergeSegmentsParallel()
     for (int i = 0; i < kPoolSize; ++i)
         if (mergePool[i].joinable())
             mergePool[i].join();
+    if (segMergeEx) {
+        rethrow_exception(segMergeEx);
+    }
 
 }
 
@@ -312,7 +340,7 @@ void mergeSegmentsDirectly()
     const size_t kMaxOpenFilesCount = 64;
 
     while (sortedFiles.size() > 1) {
-        int size = min(kMaxOpenFilesCount, sortedFiles.size());
+        size_t size = min(kMaxOpenFilesCount, sortedFiles.size());
         std::vector<string> files;
         for (size_t i = 0; i < size; ++i) {
             sortedSegment f1(sortedFiles.front());
