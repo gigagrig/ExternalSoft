@@ -1,11 +1,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <iostream>
-#include <map>
 #include <memory>
-#include <map>
 #include <mutex>
 #include <thread>
 #include <queue>
@@ -460,7 +457,7 @@ int main()
         }
 
         size_t bufSize;
-        constexpr int kMegabyte = 1024 * 1024;
+        constexpr size_t kMegabyte = 1024 * 1024;
         unique_ptr<char[]> buf = allocateMaxBuffer(120*kMegabyte, 4*kMegabyte, &bufSize);
         if (!buf) {
             cout << "Not enough RAM to sort file.\n";
@@ -491,6 +488,7 @@ int main()
 
 
         input.reset(); // closing input file
+        buf.reset(); // release bufer if no need
 
         chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
 
@@ -515,7 +513,7 @@ int main()
         return 3;
     }
 
-    cout << outputFile << " sorted " << (checkIsSorted<uint32_t>(outputFile) ? "true" : "false") << endl;
+    //cout << outputFile << " sorted " << (checkIsSorted<uint32_t>(outputFile) ? "true" : "false") << endl;
 
     return 0;
 }
