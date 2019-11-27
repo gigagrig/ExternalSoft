@@ -155,7 +155,7 @@ void mergeSortedFilesPair(const string& file1, const string& file2, const string
     unsigned nextIdx = 0;
     for(;;) {
         nextIdx = 0;
-        if (vals[1] < nextIdx)
+        if (vals[1] < vals[0])
             nextIdx = 1;
         fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
         size_t read = fread(vals + nextIdx, sizeof(uint32_t), 1, descriptors[nextIdx]);
@@ -373,7 +373,7 @@ int main()
 {
     cout << "Hello Artec!" << endl;
 
-    const char* intputFile = "INPUT";
+    const char* intputFile = "INPUT2";
 
     try {
 
@@ -403,8 +403,8 @@ int main()
         //merging
         start = chrono::steady_clock::now();
         //mergeSegmentsByPairs();
-        mergeSegmentsParallel();
-        //mergeSegmentsDirectly();
+        //mergeSegmentsParallel();
+        mergeSegmentsDirectly();
 
         chrono::steady_clock::time_point endMerge = chrono::steady_clock::now();
 
