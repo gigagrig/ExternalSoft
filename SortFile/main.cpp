@@ -444,7 +444,8 @@ unique_ptr<char[]> allocateMaxBuffer(size_t maxSize, size_t minSize, size_t* siz
     }
 }
 
-int main()
+
+int sortFileIn2Steps()
 {
     try {
 
@@ -458,34 +459,17 @@ int main()
         }
 
         size_t bufSize;
-        constexpr size_t kMegabyte = 1024 * 1024;
-        unique_ptr<char[]> buf = allocateMaxBuffer(kMegabyte, kMegabyte / 1024, &bufSize);
+        constexpr size_t kMegabyte = 1024u * 1024u;
+        unique_ptr<char[]> buf = allocateMaxBuffer(64u*kMegabyte, kMegabyte / 1024u, &bufSize);
         if (!buf) {
             cout << "Not enough RAM to sort file." << endl;
             return 2;
         }
         cout << bufSize << " bytes allocated for buffer" << endl;
 
-        fseek(input.get(), 0, SEEK_END);
-        size_t inputSize = ftell(input.get());
-        inputSize = (inputSize / sizeof(uint32_t)) * sizeof(uint32_t);
-        rewind(input.get());
-        if (inputSize <= bufSize) { // Sort file in buffer if it fits
-            cout << "Sorting directly to result file" << endl;
-            fread(buf.get(), 1, inputSize, input.get());
-            uint32_t* sortingBuf = reinterpret_cast<uint32_t*>(buf.get());
-            sort(sortingBuf, sortingBuf + inputSize / sizeof(uint32_t));
-            auto output = makeUniqueHandler(outputFile, "wb");
-            if (!output) {
-                cout << "Failed to open result file" << endl;
-                return 4;
-            }
-            fwrite(sortingBuf, 1, inputSize, output.get());
-        } else {
-            generateSortedSegmentsParallel(reinterpret_cast<uint32_t*>(buf.get()),
-                                           bufSize / sizeof(uint32_t),
-                                           input.get());
-        }
+        generateSortedSegmentsParallel(reinterpret_cast<uint32_t*>(buf.get()),
+                                       bufSize / sizeof(uint32_t),
+                                       input.get());
 
 
         input.reset(); // closing input file
@@ -498,8 +482,6 @@ int main()
         start = chrono::steady_clock::now();
         buf.reset(); // release bufer if no need
         mergeSegmentsParallel<uint32_t>();
-        //mergeSegmentsByPairs<uint32_t>();
-        //mergeSegmentsDirectly<uint32_t>(buf.get(), bufSize);
 
         chrono::steady_clock::time_point endMerge = chrono::steady_clock::now();
 
@@ -515,8 +497,17 @@ int main()
         clearTempFiles();
         return 3;
     }
-
-    //cout << outputFile << " sorted " << (checkIsSorted<uint32_t>(outputFile) ? "true" : "false") << endl;
-
+    catch (...) {
+        cerr << "Internal error : unhandled exception" << endl;
+        clearTempFiles();
+        return 4;
+    }
     return 0;
+}
+
+int main()
+{
+    int res = sortFileIn2Steps();
+
+    return res;
 }
