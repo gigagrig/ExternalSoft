@@ -38,10 +38,9 @@ typedef unique_ptr<FILE,  function<void(FILE*)>> UniqueFileHandler;
 
 UniqueFileHandler makeUniqueHandler(const char* fileName, const char* mode)
 {
-    return unique_ptr<FILE, function<void(FILE*)>>(fopen(fileName, mode), [fileName](FILE* f)
+    return unique_ptr<FILE, function<void(FILE*)>>(fopen(fileName, mode), [](FILE* f)
         {
             fclose(f);
-            cout << fileName << " closed\n";
         });
 }
 
@@ -83,14 +82,14 @@ void sortingSegmentWorker(T* buffer, size_t bufferSize, FILE* input)
 
             sort(buffer, buffer + readCount);
             string chunkName = genUniqueFilename();
-            auto output = makeUniqueHandler(chunkName.c_str(), "wb+");
+            auto output = makeUniqueHandler(chunkName.c_str(), "wb");
             if (!output) {
                 throw SortAlgException("Failed to create temporary file while sorting segments.");
             }
             fwrite(buffer, sizeof(T), readCount, output.get());
             quee.lock();
             sortedSegments.push({string(chunkName), 0});
-            cout << "chunk " << segmentsCount.fetch_add(1) + 1 << " sorted\n";
+            cout << "chunk " << segmentsCount.fetch_add(1) + 1 << " sorted" << endl;
             quee.unlock();
         }
     }
@@ -132,9 +131,9 @@ void generateSortedSegments(T* sortingBuffer, size_t bufferSize, FILE* input)
             return;
         }
         sort(sortingBuffer, sortingBuffer + readCount);
-        cout << "chunk " << ++chunk << " sorted\n";
+        cout << "chunk " << ++chunk << " sorted" << endl;
         const char *chunkName =  tmpnam(0);
-        auto output = makeUniqueHandler(chunkName, "wb+");
+        auto output = makeUniqueHandler(chunkName, "wb");
         if (!output) {
             throw SortAlgException("Failed to create temporary file while sorting segments."); //
         }
@@ -146,12 +145,11 @@ void generateSortedSegments(T* sortingBuffer, size_t bufferSize, FILE* input)
 template<typename T>
 void mergeSortedFilesPair(const string& file1, const string& file2, const string& resultName)
 {
-    cout << "Merging " << file1 << " and " << file2 << " to " << resultName << "\n";
     auto f1 = makeUniqueHandler(file1.c_str(), "rb");
     auto f2 = makeUniqueHandler(file2.c_str(), "rb");
     if (!f1 || !f2)
         throw SortAlgException("Failed to read temporary file while merging");
-    auto output = makeUniqueHandler(resultName.c_str(), "wb+");
+    auto output = makeUniqueHandler(resultName.c_str(), "wb");
 
     FILE* outDesc = output.get();
     if (!output) {
@@ -244,7 +242,7 @@ private:
 template<typename T>
 void mergeSortedFiles(const vector<string>& files, const string& resultName, char *buffer, size_t bufferSize)
 {
-    auto output = makeUniqueHandler(resultName.c_str(), "wb+");
+    auto output = makeUniqueHandler(resultName.c_str(), "wb");
 
     FILE* outDesc = output.get();
     if (!output) {
@@ -286,6 +284,10 @@ void mergeSortedFileWork(int targetMerges)
             string resFile;
             int nextLevel = max(f1.level, f2.level) + 1;
             resFile = currentMerge < targetMerges ? string(tmpnam(0)) : string(outputFile);
+            cout << "Merging " << f1.filename << " and " << f2.filename
+                 << " to " << resFile
+                 << " (" << currentMerge << " of " << targetMerges << ')' << endl;
+
             mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
 
             queue.lock();
@@ -308,10 +310,10 @@ void mergeSortedFileWork(int targetMerges)
         // remove temp files if they still exists
         remove(f1.filename.c_str());
         remove(f2.filename.c_str());
-        cout << "Thread " << this_thread::get_id() << " throwed exception\n";
+        cout << "Thread " << this_thread::get_id() << " throwed exception" << endl;
         rethrow_exception(segMergeEx);
     }
-    cout << "Thread " << this_thread::get_id() << " finished\n";
+    cout << "Thread " << this_thread::get_id() << " finished" << endl;
 }
 
 template<typename T>
@@ -341,7 +343,10 @@ void mergeSegmentsParallel()
 template<typename T>
 void mergeSegmentsByPairs()
 {
+    int targetMerges = sortedSegments.size() - 1;
+    int currentMerge = 0;
     while (sortedSegments.size() > 1) {
+        ++currentMerge;
         sortedSegment f1(sortedSegments.front());
         sortedSegments.pop();
         sortedSegment f2(sortedSegments.front());
@@ -349,6 +354,9 @@ void mergeSegmentsByPairs()
         string resFile;
         int nextLevel = max(f1.level, f2.level) + 1;
         resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string(outputFile);
+        cout << "Merging " << f1.filename << " and " << f2.filename
+             << " to " << resFile
+             << " (" << currentMerge << " of " << targetMerges << ')' << endl;
         mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
         sortedSegments.push(sortedSegment{resFile, nextLevel});
         remove(f1.filename.c_str());
@@ -445,7 +453,7 @@ int main()
         unique_ptr<FILE,  function<void(FILE*)>> input = makeUniqueHandler(intputFile, "rb");
 
         if (!input) {
-            cerr << "Failed top open INPUT file.\n";
+            cerr << "Failed top open INPUT file." << endl;
             return 1;
         }
 
@@ -453,23 +461,23 @@ int main()
         constexpr size_t kMegabyte = 1024 * 1024;
         unique_ptr<char[]> buf = allocateMaxBuffer(kMegabyte, kMegabyte / 1024, &bufSize);
         if (!buf) {
-            cout << "Not enough RAM to sort file.\n";
+            cout << "Not enough RAM to sort file." << endl;
             return 2;
         }
-        cout << bufSize << " bytes allocated for buffer\n";
+        cout << bufSize << " bytes allocated for buffer" << endl;
 
         fseek(input.get(), 0, SEEK_END);
         size_t inputSize = ftell(input.get());
         inputSize = (inputSize / sizeof(uint32_t)) * sizeof(uint32_t);
         rewind(input.get());
         if (inputSize <= bufSize) { // Sort file in buffer if it fits
-            cout << "Sorting directly to result file\n";
+            cout << "Sorting directly to result file" << endl;
             fread(buf.get(), 1, inputSize, input.get());
             uint32_t* sortingBuf = reinterpret_cast<uint32_t*>(buf.get());
             sort(sortingBuf, sortingBuf + inputSize / sizeof(uint32_t));
-            auto output = makeUniqueHandler(outputFile, "wb+");
+            auto output = makeUniqueHandler(outputFile, "wb");
             if (!output) {
-                cout << "Failed to open result file\n";
+                cout << "Failed to open result file" << endl;
                 return 4;
             }
             fwrite(sortingBuf, 1, inputSize, output.get());
@@ -497,10 +505,10 @@ int main()
 
         cout << "Sorting took "
                   << sortDurationMs
-                  << "ms.\n";
+                  << "ms." << endl;
         cout << "Merging took "
                   << std::chrono::duration_cast<chrono::milliseconds>(endMerge - start).count()
-                  << "ms.\n";
+                  << "ms." << endl;
     }
     catch (exception& ex) {
         cerr << ex.what() << endl;
