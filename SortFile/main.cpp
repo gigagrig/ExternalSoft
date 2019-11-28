@@ -64,8 +64,7 @@ string genUniqueFilename() {
 }
 
 
-template<typename T>
-void sortingSegmentWorker(T* buffer, size_t bufferSize, FILE* input)
+void sortingSegmentWorker(uint32_t* buffer, size_t bufferSize, FILE* input)
 {
     try {
         unique_lock<mutex> inp(inputMutex, defer_lock);
@@ -73,7 +72,7 @@ void sortingSegmentWorker(T* buffer, size_t bufferSize, FILE* input)
         while (!isFileRead.load())
         {
             inp.lock();
-            size_t readCount = fread(buffer, sizeof(T), bufferSize, input);
+            size_t readCount = fread(buffer, sizeof(uint32_t), bufferSize, input);
             inp.unlock();
             if (readCount == 0) {
                 isFileRead.store(true);
@@ -86,7 +85,7 @@ void sortingSegmentWorker(T* buffer, size_t bufferSize, FILE* input)
             if (!output) {
                 throw SortAlgException("Failed to create temporary file while sorting segments.");
             }
-            fwrite(buffer, sizeof(T), readCount, output.get());
+            fwrite(buffer, sizeof(uint32_t), readCount, output.get());
             quee.lock();
             sortedSegments.push({string(chunkName), 0});
             cout << "chunk " << segmentsCount.fetch_add(1) + 1 << " sorted" << endl;
@@ -100,8 +99,7 @@ void sortingSegmentWorker(T* buffer, size_t bufferSize, FILE* input)
 
 }
 
-template<typename T>
-void generateSortedSegmentsParallel(T* sortingBuffer, size_t bufferSize, FILE* input) {
+void generateSortedSegmentsParallel(uint32_t* sortingBuffer, size_t bufferSize, FILE* input) {
 
     constexpr int kWorkersCount = 4;
     thread sortWorkers[kWorkersCount];
@@ -110,7 +108,7 @@ void generateSortedSegmentsParallel(T* sortingBuffer, size_t bufferSize, FILE* i
     segSortEx = nullptr;
     const int workerBufSize = bufferSize / kWorkersCount;
     for (int i = 0; i < kWorkersCount; ++i)
-        sortWorkers[i] = thread(sortingSegmentWorker<T>, sortingBuffer + i*workerBufSize, workerBufSize, input);
+        sortWorkers[i] = thread(sortingSegmentWorker, sortingBuffer + i*workerBufSize, workerBufSize, input);
     for (int i = 0; i < kWorkersCount; ++i)
         if (sortWorkers[i].joinable())
             sortWorkers[i].join();
@@ -121,12 +119,11 @@ void generateSortedSegmentsParallel(T* sortingBuffer, size_t bufferSize, FILE* i
 }
 
 
-template<typename T>
-void generateSortedSegments(T* sortingBuffer, size_t bufferSize, FILE* input)
+void generateSortedSegments(uint32_t* sortingBuffer, size_t bufferSize, FILE* input)
 {
     int chunk = 0;
     while(!feof(input)) {
-        size_t readCount = fread(sortingBuffer, sizeof(T), bufferSize, input);
+        size_t readCount = fread(sortingBuffer, sizeof(uint32_t), bufferSize, input);
         if (readCount == 0) {
             return;
         }
@@ -137,12 +134,11 @@ void generateSortedSegments(T* sortingBuffer, size_t bufferSize, FILE* input)
         if (!output) {
             throw SortAlgException("Failed to create temporary file while sorting segments."); //
         }
-        fwrite(sortingBuffer, sizeof(T),  readCount, output.get());
+        fwrite(sortingBuffer, sizeof(uint32_t),  readCount, output.get());
         sortedSegments.push({string(chunkName), 0});
     }
 }
 
-template<typename T>
 void mergeSortedFilesPair(const string& file1, const string& file2, const string& resultName)
 {
     auto f1 = makeUniqueHandler(file1.c_str(), "rb");
@@ -156,18 +152,18 @@ void mergeSortedFilesPair(const string& file1, const string& file2, const string
         throw SortAlgException("Failed to create temporary file while merging");
     }
 
-    T vals[2];
+    uint32_t vals[2];
     FILE* descriptors[2] {f1.get(), f2.get()};
-    fread(vals, sizeof(T), 1, descriptors[0]);
-    fread(vals+1, sizeof(T), 1, descriptors[1]);
+    fread(vals, sizeof(uint32_t), 1, descriptors[0]);
+    fread(vals+1, sizeof(uint32_t), 1, descriptors[1]);
 
     unsigned nextIdx = 0;
     for(;;) {
         nextIdx = 0;
         if (vals[1] < vals[0])
             nextIdx = 1;
-        fwrite(vals + nextIdx, sizeof(T), 1, outDesc);
-        size_t read = fread(vals + nextIdx, sizeof(T), 1, descriptors[nextIdx]);
+        fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
+        size_t read = fread(vals + nextIdx, sizeof(uint32_t), 1, descriptors[nextIdx]);
         if (read == 0) {
             break;
         }
@@ -175,18 +171,18 @@ void mergeSortedFilesPair(const string& file1, const string& file2, const string
 
     // writing the remaining data in another stream
     nextIdx = (nextIdx + 1) % 2;
-    fwrite(vals + nextIdx, sizeof(T), 1, outDesc);
-    while (0 < fread(vals + nextIdx, sizeof(T), 1, descriptors[nextIdx])) {
-        fwrite(vals + nextIdx, sizeof(T), 1, outDesc);
+    fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
+    while (0 < fread(vals + nextIdx, sizeof(uint32_t), 1, descriptors[nextIdx])) {
+        fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
     }
 }
 
 
-template<class T> class MinStream
+class MinStream
 {
 public:
     struct heapItem {
-        T value;
+        uint32_t value;
         FILE* fileIdx;
         bool operator<(heapItem item) const {
             return this->value > item.value;
@@ -203,8 +199,8 @@ public:
                     throw SortAlgException("Failed to read temporary file while merging");
                 }
                 setvbuf(m_handlers[i].get(), buffer + i*streamBufSize, _IOFBF, streamBufSize);
-                T initValue;
-                fread(&initValue, sizeof(T), 1, m_handlers[i].get());
+                uint32_t initValue;
+                fread(&initValue, sizeof(uint32_t), 1, m_handlers[i].get());
                 m_heapStream.push_back({initValue, m_handlers[i].get()});
             }
             make_heap(m_heapStream.begin(), m_heapStream.end());
@@ -216,12 +212,12 @@ public:
         }
     }
 
-    T getNextValue() {
-        T next = m_heapStream[0].value;
+    uint32_t getNextValue() {
+        uint32_t next = m_heapStream[0].value;
         FILE* fileIdx = m_heapStream[0].fileIdx;
         pop_heap(m_heapStream.begin(), m_heapStream.end());
-        T newNext;
-        if (fread(&newNext, sizeof(T), 1, fileIdx) == 1) {
+        uint32_t newNext;
+        if (fread(&newNext, sizeof(uint32_t), 1, fileIdx) == 1) {
             m_heapStream.back() = {newNext, fileIdx};
             push_heap(m_heapStream.begin(), m_heapStream.end());
         } else {
@@ -239,7 +235,6 @@ private:
 };
 
 
-template<typename T>
 void mergeSortedFiles(const vector<string>& files, const string& resultName, char *buffer, size_t bufferSize)
 {
     auto output = makeUniqueHandler(resultName.c_str(), "wb");
@@ -251,15 +246,14 @@ void mergeSortedFiles(const vector<string>& files, const string& resultName, cha
 
     const int outBufSize = bufferSize / (files.size() - 1);
     setvbuf(outDesc, buffer, _IOFBF, outBufSize);
-    MinStream<T> valuesStream(files, buffer + outBufSize, bufferSize = outBufSize);
+    MinStream valuesStream(files, buffer + outBufSize, bufferSize = outBufSize);
     while (valuesStream.openStreamsCount() > 0) {
-        T val = valuesStream.getNextValue();
-        fwrite(&val, sizeof(T), 1, outDesc);
+        uint32_t val = valuesStream.getNextValue();
+        fwrite(&val, sizeof(uint32_t), 1, outDesc);
     }
 }
 
 
-template<typename T>
 void mergeSortedFileWork(int targetMerges)
 {
     sortedSegment f1;
@@ -288,7 +282,7 @@ void mergeSortedFileWork(int targetMerges)
                  << " to " << resFile
                  << " (" << currentMerge << " of " << targetMerges << ')' << endl;
 
-            mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
+            mergeSortedFilesPair(f1.filename, f2.filename, resFile);
 
             queue.lock();
             sortedSegments.push(sortedSegment{resFile, nextLevel});
@@ -316,7 +310,6 @@ void mergeSortedFileWork(int targetMerges)
     cout << "Thread " << this_thread::get_id() << " finished" << endl;
 }
 
-template<typename T>
 void mergeSegmentsParallel()
 {
     if (sortedSegments.size() <= 1) {
@@ -330,7 +323,7 @@ void mergeSegmentsParallel()
     thread mergePool[kPoolSize];
     merged.store(0);
     for (int i = 0; i < kPoolSize; ++i)
-        mergePool[i] = thread(mergeSortedFileWork<T>, targetMerges);
+        mergePool[i] = thread(mergeSortedFileWork, targetMerges);
     for (int i = 0; i < kPoolSize; ++i)
         if (mergePool[i].joinable())
             mergePool[i].join();
@@ -340,7 +333,6 @@ void mergeSegmentsParallel()
 }
 
 
-template<typename T>
 void mergeSegmentsByPairs()
 {
     int targetMerges = sortedSegments.size() - 1;
@@ -357,14 +349,13 @@ void mergeSegmentsByPairs()
         cout << "Merging " << f1.filename << " and " << f2.filename
              << " to " << resFile
              << " (" << currentMerge << " of " << targetMerges << ')' << endl;
-        mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
+        mergeSortedFilesPair(f1.filename, f2.filename, resFile);
         sortedSegments.push(sortedSegment{resFile, nextLevel});
         remove(f1.filename.c_str());
         remove(f2.filename.c_str());
     }
 }
 
-template<typename T>
 void mergeSegmentsDirectly(char* buffer, size_t bufSize)
 {
     const size_t kMaxOpenFilesCount = 32;
@@ -379,7 +370,7 @@ void mergeSegmentsDirectly(char* buffer, size_t bufSize)
         }
         string resFile;
         resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string(outputFile);
-        mergeSortedFiles<T>(files, resFile, buffer, bufSize);
+        mergeSortedFiles(files, resFile, buffer, bufSize);
         sortedSegments.push(sortedSegment{resFile, 0});
         for (size_t i = 0; i < files.size(); ++i) {
             remove(files[i].c_str());
@@ -397,7 +388,6 @@ void clearTempFiles()
     }
 }
 
-template<typename T>
 bool checkIsSorted(const char* filename)
 {
     unique_ptr<FILE,  function<void(FILE*)>> input = makeUniqueHandler(filename, "rb");
@@ -406,13 +396,13 @@ bool checkIsSorted(const char* filename)
         return false;
     }
     FILE* inputRaw = input.get();
-    T current;
-    if (0 == fread(&current, sizeof(T), 1, inputRaw)) {
+    uint32_t current;
+    if (0 == fread(&current, sizeof(uint32_t), 1, inputRaw)) {
         return true;
     }
-    T next;
+    uint32_t next;
     while(true) {
-        if (0 == fread(&next, sizeof(T), 1, inputRaw)) {
+        if (0 == fread(&next, sizeof(uint32_t), 1, inputRaw)) {
             return true;
         }
         if (next < current)
@@ -460,7 +450,7 @@ int sortFileIn2Steps()
 
         size_t bufSize;
         constexpr size_t kMegabyte = 1024u * 1024u;
-        unique_ptr<char[]> buf = allocateMaxBuffer(64u*kMegabyte, kMegabyte / 1024u, &bufSize);
+        unique_ptr<char[]> buf = allocateMaxBuffer(64u*kMegabyte, kMegabyte, &bufSize);
         if (!buf) {
             cout << "Not enough RAM to sort file." << endl;
             return 2;
@@ -481,7 +471,7 @@ int sortFileIn2Steps()
         //merging
         start = chrono::steady_clock::now();
         buf.reset(); // release bufer if no need
-        mergeSegmentsParallel<uint32_t>();
+        mergeSegmentsParallel();
 
         chrono::steady_clock::time_point endMerge = chrono::steady_clock::now();
 
