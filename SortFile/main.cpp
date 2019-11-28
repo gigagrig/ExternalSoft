@@ -5,13 +5,16 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-#include <queue>
+#include <list>
 
 
 using namespace std;
 
-const char* intputFile = "input";
 const char* outputFile = "output";
+
+constexpr size_t kKilobyte = 1024u;
+constexpr size_t kMegabyte = 1024u * kKilobyte;
+
 
 
 /// Possible exception on sorting process
@@ -23,13 +26,6 @@ public:
     const char* what() const noexcept override { return m_what.c_str(); }
 private:
     string m_what;
-};
-
-/// sorted part of input file
-struct sortedSegment
-{
-    string filename; // temp filename
-    int level; // number of merges (starts with 0)
 };
 
 
@@ -52,7 +48,7 @@ atomic_int segmentsCount; // count of read and sorted segments from input
 exception_ptr segSortEx = nullptr; // exception occured while parallel sorting
 exception_ptr segMergeEx = nullptr; // exception occured while parallel merging
 atomic_int merged; // flag, that indicates all segments where merged
-queue<sortedSegment> sortedSegments; // queue of sorted segments that need to be merged
+list<string> sortedSegments; // queue of sorted segments that need to be merged
 mutex queeMutex; // mutex on queue of files
 }
 
@@ -63,13 +59,14 @@ string genUniqueFilename() {
     return string(nameBuf);
 }
 
-
-void sortingSegmentWorker(uint32_t* buffer, size_t bufferSize, FILE* input)
+// worker that sorts segments of file INPUT
+// sorts until file has been read or maxsegments count reached
+void sortingSegmentWorker(uint32_t* buffer, size_t bufferSize, FILE* input, int maxSegmentsCount)
 {
     try {
         unique_lock<mutex> inp(inputMutex, defer_lock);
         unique_lock<mutex> quee(inputMutex, defer_lock);
-        while (!isFileRead.load())
+        while (!isFileRead.load() && segmentsCount.load() < maxSegmentsCount)
         {
             inp.lock();
             size_t readCount = fread(buffer, sizeof(uint32_t), bufferSize, input);
@@ -87,7 +84,7 @@ void sortingSegmentWorker(uint32_t* buffer, size_t bufferSize, FILE* input)
             }
             fwrite(buffer, sizeof(uint32_t), readCount, output.get());
             quee.lock();
-            sortedSegments.push({string(chunkName), 0});
+            sortedSegments.push_back(string(chunkName));
             cout << "chunk " << segmentsCount.fetch_add(1) + 1 << " sorted" << endl;
             quee.unlock();
         }
@@ -96,20 +93,24 @@ void sortingSegmentWorker(uint32_t* buffer, size_t bufferSize, FILE* input)
         isFileRead.store(true);
         segSortEx = current_exception();
     }
-
 }
 
-void generateSortedSegmentsParallel(uint32_t* sortingBuffer, size_t bufferSize, FILE* input) {
+// sorts file parts to temp files
+// until file has been read or maxsegments count reached
+// TODO : (names saves to list sortedSegments) -> hide global var from API
+void generateSortedSegmentsParallel(uint32_t* sortingBuffer, size_t bufferSize, FILE* input,
+                                    int numOfThreads,
+                                    int maxSegmentsCount = 64 * 1024) {
 
-    constexpr int kWorkersCount = 4;
-    thread sortWorkers[kWorkersCount];
+    const int workersCount = numOfThreads;
+    thread sortWorkers[workersCount];
     isFileRead.store(false);
     segmentsCount.store(0);
     segSortEx = nullptr;
-    const int workerBufSize = bufferSize / kWorkersCount;
-    for (int i = 0; i < kWorkersCount; ++i)
-        sortWorkers[i] = thread(sortingSegmentWorker, sortingBuffer + i*workerBufSize, workerBufSize, input);
-    for (int i = 0; i < kWorkersCount; ++i)
+    const int workerBufSize = bufferSize / workersCount;
+    for (int i = 0; i < workersCount; ++i)
+        sortWorkers[i] = thread(sortingSegmentWorker, sortingBuffer + i*workerBufSize, workerBufSize, input, maxSegmentsCount);
+    for (int i = 0; i < workersCount; ++i)
         if (sortWorkers[i].joinable())
             sortWorkers[i].join();
 
@@ -135,7 +136,7 @@ void generateSortedSegments(uint32_t* sortingBuffer, size_t bufferSize, FILE* in
             throw SortAlgException("Failed to create temporary file while sorting segments."); //
         }
         fwrite(sortingBuffer, sizeof(uint32_t),  readCount, output.get());
-        sortedSegments.push({string(chunkName), 0});
+        sortedSegments.push_back(string(chunkName));
     }
 }
 
@@ -256,8 +257,8 @@ void mergeSortedFiles(const vector<string>& files, const string& resultName, cha
 
 void mergeSortedFileWork(int targetMerges)
 {
-    sortedSegment f1;
-    sortedSegment f2;
+    string f1;
+    string f2;
     try {
         for(int m = merged.load(); m < targetMerges && m >= 0;  m = merged.load()) {
 
@@ -268,32 +269,31 @@ void mergeSortedFileWork(int targetMerges)
                 continue;
             }
             f1 = sortedSegments.front();
-            sortedSegments.pop();
+            sortedSegments.pop_front();
             f2 = sortedSegments.front();
-            sortedSegments.pop();
+            sortedSegments.pop_front();
             int currentMerge = merged.fetch_add(1) + 1;
             queue.unlock();
 
             // merging to resfile
             string resFile;
-            int nextLevel = max(f1.level, f2.level) + 1;
             resFile = currentMerge < targetMerges ? string(tmpnam(0)) : string(outputFile);
-            cout << "Merging " << f1.filename << " and " << f2.filename
+            cout << "Merging " << f1 << " and " << f2
                  << " to " << resFile
                  << " (" << currentMerge << " of " << targetMerges << ')' << endl;
 
-            mergeSortedFilesPair(f1.filename, f2.filename, resFile);
+            mergeSortedFilesPair(f1, f2, resFile);
 
             queue.lock();
-            sortedSegments.push(sortedSegment{resFile, nextLevel});
+            sortedSegments.push_back(resFile);
             queue.unlock();
 
             // removing temp files
-            if (0 != remove(f1.filename.c_str())) {
-                cout << "FAILED TO REMOVE FILE " << f1.filename << endl;
+            if (0 != remove(f1.c_str())) {
+                cout << "FAILED TO REMOVE FILE " << f1 << endl;
             }
-            if (0 != remove(f2.filename.c_str())) {
-                cout << "FAILED TO REMOVE FILE " << f2.filename << endl;
+            if (0 != remove(f2.c_str())) {
+                cout << "FAILED TO REMOVE FILE " << f2 << endl;
             }
         }
     }
@@ -302,15 +302,15 @@ void mergeSortedFileWork(int targetMerges)
         merged.store(-1);
         segMergeEx = current_exception();
         // remove temp files if they still exists
-        remove(f1.filename.c_str());
-        remove(f2.filename.c_str());
+        remove(f1.c_str());
+        remove(f2.c_str());
         cout << "Thread " << this_thread::get_id() << " throwed exception" << endl;
         rethrow_exception(segMergeEx);
     }
     cout << "Thread " << this_thread::get_id() << " finished" << endl;
 }
 
-void mergeSegmentsParallel()
+void mergeSegmentsParallel(int numOfThreads)
 {
     if (sortedSegments.size() <= 1) {
         return;
@@ -319,12 +319,12 @@ void mergeSegmentsParallel()
     int targetMerges = sortedSegments.size() - 1;
 
     segMergeEx = nullptr;
-    constexpr int kPoolSize = 4;
-    thread mergePool[kPoolSize];
     merged.store(0);
-    for (int i = 0; i < kPoolSize; ++i)
+
+    thread mergePool[numOfThreads];
+    for (int i = 0; i < numOfThreads; ++i)
         mergePool[i] = thread(mergeSortedFileWork, targetMerges);
-    for (int i = 0; i < kPoolSize; ++i)
+    for (int i = 0; i < numOfThreads; ++i)
         if (mergePool[i].joinable())
             mergePool[i].join();
     if (segMergeEx) {
@@ -339,20 +339,19 @@ void mergeSegmentsByPairs()
     int currentMerge = 0;
     while (sortedSegments.size() > 1) {
         ++currentMerge;
-        sortedSegment f1(sortedSegments.front());
-        sortedSegments.pop();
-        sortedSegment f2(sortedSegments.front());
-        sortedSegments.pop();
+        string f1(sortedSegments.front());
+        sortedSegments.pop_front();
+        string f2(sortedSegments.front());
+        sortedSegments.pop_front();
         string resFile;
-        int nextLevel = max(f1.level, f2.level) + 1;
         resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string(outputFile);
-        cout << "Merging " << f1.filename << " and " << f2.filename
+        cout << "Merging " << f1 << " and " << f2
              << " to " << resFile
              << " (" << currentMerge << " of " << targetMerges << ')' << endl;
-        mergeSortedFilesPair(f1.filename, f2.filename, resFile);
-        sortedSegments.push(sortedSegment{resFile, nextLevel});
-        remove(f1.filename.c_str());
-        remove(f2.filename.c_str());
+        mergeSortedFilesPair(f1, f2, resFile);
+        sortedSegments.push_back(resFile);
+        remove(f1.c_str());
+        remove(f2.c_str());
     }
 }
 
@@ -364,14 +363,14 @@ void mergeSegmentsDirectly(char* buffer, size_t bufSize)
         size_t size = min(kMaxOpenFilesCount, sortedSegments.size());
         std::vector<string> files;
         for (size_t i = 0; i < size; ++i) {
-            sortedSegment f1(sortedSegments.front());
-            sortedSegments.pop();
-            files.push_back(f1.filename);
+            string f1(sortedSegments.front());
+            sortedSegments.pop_front();
+            files.push_back(f1);
         }
         string resFile;
         resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string(outputFile);
         mergeSortedFiles(files, resFile, buffer, bufSize);
-        sortedSegments.push(sortedSegment{resFile, 0});
+        sortedSegments.push_back(resFile);
         for (size_t i = 0; i < files.size(); ++i) {
             remove(files[i].c_str());
         }
@@ -382,9 +381,9 @@ void mergeSegmentsDirectly(char* buffer, size_t bufSize)
 void clearTempFiles()
 {
     while (sortedSegments.size() > 0) {
-        cout << "Removing temp file " << sortedSegments.front().filename.c_str() << endl;
-        remove(sortedSegments.front().filename.c_str());
-        sortedSegments.pop();
+        cout << "Removing temp file " << sortedSegments.front() << endl;
+        remove(sortedSegments.front().c_str());
+        sortedSegments.pop_front();
     }
 }
 
@@ -434,14 +433,17 @@ unique_ptr<char[]> allocateMaxBuffer(size_t maxSize, size_t minSize, size_t* siz
     }
 }
 
-
-int sortFileIn2Steps()
+// sort input file to output
+// TODO : replace gloabal params(names of files) to function parameters
+// spliting whole file to sorted segments
+// uniting segments after
+int sortFileIn2Steps(const char* inputFile, size_t maxBufferSize, int numOfThreads)
 {
     try {
 
         chrono::steady_clock::time_point start = chrono::steady_clock::now();
 
-        unique_ptr<FILE,  function<void(FILE*)>> input = makeUniqueHandler(intputFile, "rb");
+        unique_ptr<FILE,  function<void(FILE*)>> input = makeUniqueHandler(inputFile, "rb");
 
         if (!input) {
             cerr << "Failed top open INPUT file." << endl;
@@ -449,8 +451,7 @@ int sortFileIn2Steps()
         }
 
         size_t bufSize;
-        constexpr size_t kMegabyte = 1024u * 1024u;
-        unique_ptr<char[]> buf = allocateMaxBuffer(64u*kMegabyte, kMegabyte, &bufSize);
+        unique_ptr<char[]> buf = allocateMaxBuffer(maxBufferSize, kKilobyte,  &bufSize);
         if (!buf) {
             cout << "Not enough RAM to sort file." << endl;
             return 2;
@@ -459,7 +460,8 @@ int sortFileIn2Steps()
 
         generateSortedSegmentsParallel(reinterpret_cast<uint32_t*>(buf.get()),
                                        bufSize / sizeof(uint32_t),
-                                       input.get());
+                                       input.get(),
+                                       numOfThreads);
 
 
         input.reset(); // closing input file
@@ -471,7 +473,8 @@ int sortFileIn2Steps()
         //merging
         start = chrono::steady_clock::now();
         buf.reset(); // release bufer if no need
-        mergeSegmentsParallel();
+
+        mergeSegmentsParallel(numOfThreads);
 
         chrono::steady_clock::time_point endMerge = chrono::steady_clock::now();
 
@@ -495,9 +498,75 @@ int sortFileIn2Steps()
     return 0;
 }
 
+// sort input file to output
+// TODO : replace gloabal params(names of files) to function parameters
+// 1) spliting file to sorted segments until max count (@param maxCountOfTempFiles) reached
+// 2) uniting segments to output
+// repeats 1-2 until input's been read
+int sortFileStepByStep(const char* inputFile,  size_t maxBufferSize, int numOfThreads, int maxCountOfTempFiles)
+{
+    try {
+
+        chrono::steady_clock::time_point start = chrono::steady_clock::now();
+
+        unique_ptr<FILE,  function<void(FILE*)>> input = makeUniqueHandler(inputFile, "rb");
+
+        if (!input) {
+            cerr << "Failed top open INPUT file." << endl;
+            return 1;
+        }
+
+        size_t bufSize;
+        unique_ptr<char[]> buf = allocateMaxBuffer(maxBufferSize, kKilobyte, &bufSize);
+        if (!buf) {
+            cout << "Not enough RAM to sort file." << endl;
+            return 2;
+        }
+        cout << bufSize << " bytes allocated for buffer" << endl;
+        int cycles = 0;
+        while (!feof(input.get())) {
+            generateSortedSegmentsParallel(reinterpret_cast<uint32_t*>(buf.get()),
+                                           bufSize / sizeof(uint32_t),
+                                           input.get(),
+                                           numOfThreads,
+                                           maxCountOfTempFiles);
+            cycles++;
+            cout << "Total " << cycles * maxCountOfTempFiles << " segmets were sorted" << endl;
+            // merging to ouptut
+            mergeSegmentsParallel(numOfThreads);
+        }
+
+        input.reset(); // closing input file
+        buf.reset(); // release bufer if no need
+
+        chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+
+        auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
+
+        cout << "Sorting took "
+                  << sortDurationMs
+                  << "ms." << endl;
+    }
+    catch (exception& ex) {
+        cerr << ex.what() << endl;
+        clearTempFiles();
+        return 3;
+    }
+    catch (...) {
+        cerr << "Internal error : unhandled exception" << endl;
+        clearTempFiles();
+        return 4;
+    }
+    return 0;
+}
+
+
 int main()
 {
-    int res = sortFileIn2Steps();
+
+    //int res = sortFileIn2Steps(inputFile, 64*kMegabyte,  kNumOfThreads);
+
+    int res = sortFileStepByStep("input2", 512*kKilobyte,  4, 256);
 
     return res;
 }
