@@ -10,8 +10,8 @@
 
 using namespace std;
 
-const char* intputFile = "INPUT";
-const char* outputFile = "OUTPUT";
+const char* intputFile = "input";
+const char* outputFile = "output";
 
 
 /// Possible exception on sorting process
@@ -52,7 +52,7 @@ atomic_bool isFileRead; // flag, that indicates whether input file was read
 atomic_int segmentsCount; // count of read and sorted segments from input
 exception_ptr segSortEx = nullptr; // exception occured while parallel sorting
 exception_ptr segMergeEx = nullptr; // exception occured while parallel merging
-atomic_bool merged; // flag, that indicates all segments where merged
+atomic_int merged; // flag, that indicates all segments where merged
 queue<sortedSegment> sortedSegments; // queue of sorted segments that need to be merged
 mutex queeMutex; // mutex on queue of files
 }
@@ -262,14 +262,14 @@ void mergeSortedFiles(const vector<string>& files, const string& resultName, cha
 
 
 template<typename T>
-void mergeSortedFileWork(int targetLevel)
+void mergeSortedFileWork(int targetMerges)
 {
+    sortedSegment f1;
+    sortedSegment f2;
     try {
-        while(!merged.load()) {
+        for(int m = merged.load(); m < targetMerges && m >= 0;  m = merged.load()) {
 
             // fetching next files to merge
-            sortedSegment f1;
-            sortedSegment f2;
             unique_lock<mutex> queue(queeMutex, defer_lock);
             queue.lock();
             if (sortedSegments.size() < 2) {
@@ -279,15 +279,13 @@ void mergeSortedFileWork(int targetLevel)
             sortedSegments.pop();
             f2 = sortedSegments.front();
             sortedSegments.pop();
+            int currentMerge = merged.fetch_add(1) + 1;
             queue.unlock();
 
             // merging to resfile
             string resFile;
             int nextLevel = max(f1.level, f2.level) + 1;
-            if (nextLevel == targetLevel) {
-                merged.store(true);
-            }
-            resFile = nextLevel < targetLevel ? string(tmpnam(0)) : string(outputFile);
+            resFile = currentMerge < targetMerges ? string(tmpnam(0)) : string(outputFile);
             mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
 
             queue.lock();
@@ -301,16 +299,15 @@ void mergeSortedFileWork(int targetLevel)
             if (0 != remove(f2.filename.c_str())) {
                 cout << "FAILED TO REMOVE FILE " << f2.filename << endl;
             }
-
-            if (nextLevel == targetLevel) {
-                break;
-            }
         }
     }
     catch(...)
     {
-        merged.store(true);
+        merged.store(-1);
         segMergeEx = current_exception();
+        // remove temp files if they still exists
+        remove(f1.filename.c_str());
+        remove(f2.filename.c_str());
         cout << "Thread " << this_thread::get_id() << " throwed exception\n";
         rethrow_exception(segMergeEx);
     }
@@ -324,23 +321,20 @@ void mergeSegmentsParallel()
         return;
     }
 
-    // calculating target level
-    int targetLevel = 0;
-    for(int pow2 = 1; pow2 < sortedSegments.size(); pow2 *=2, ++targetLevel);
+    int targetMerges = sortedSegments.size() - 1;
 
     segMergeEx = nullptr;
     constexpr int kPoolSize = 4;
     thread mergePool[kPoolSize];
-    merged.store(false);
+    merged.store(0);
     for (int i = 0; i < kPoolSize; ++i)
-        mergePool[i] = thread(mergeSortedFileWork<T>, targetLevel);
+        mergePool[i] = thread(mergeSortedFileWork<T>, targetMerges);
     for (int i = 0; i < kPoolSize; ++i)
         if (mergePool[i].joinable())
             mergePool[i].join();
     if (segMergeEx) {
         rethrow_exception(segMergeEx);
     }
-
 }
 
 
@@ -354,7 +348,7 @@ void mergeSegmentsByPairs()
         sortedSegments.pop();
         string resFile;
         int nextLevel = max(f1.level, f2.level) + 1;
-        resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string("OUTPUT");
+        resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string(outputFile);
         mergeSortedFilesPair<T>(f1.filename, f2.filename, resFile);
         sortedSegments.push(sortedSegment{resFile, nextLevel});
         remove(f1.filename.c_str());
@@ -376,7 +370,6 @@ void mergeSegmentsDirectly(char* buffer, size_t bufSize)
             files.push_back(f1.filename);
         }
         string resFile;
-        //int nextLevel = max(f1.level, f2.level) + 1;
         resFile = sortedSegments.size() > 0 ? string(tmpnam(0)) : string(outputFile);
         mergeSortedFiles<T>(files, resFile, buffer, bufSize);
         sortedSegments.push(sortedSegment{resFile, 0});
@@ -458,15 +451,15 @@ int main()
 
         size_t bufSize;
         constexpr size_t kMegabyte = 1024 * 1024;
-        unique_ptr<char[]> buf = allocateMaxBuffer(120*kMegabyte, 4*kMegabyte, &bufSize);
+        unique_ptr<char[]> buf = allocateMaxBuffer(kMegabyte, kMegabyte / 1024, &bufSize);
         if (!buf) {
             cout << "Not enough RAM to sort file.\n";
             return 2;
         }
         cout << bufSize << " bytes allocated for buffer\n";
 
-        fseeko64(input.get(), 0, SEEK_END);
-        size_t inputSize = ftello64(input.get());
+        fseek(input.get(), 0, SEEK_END);
+        size_t inputSize = ftell(input.get());
         inputSize = (inputSize / sizeof(uint32_t)) * sizeof(uint32_t);
         rewind(input.get());
         if (inputSize <= bufSize) { // Sort file in buffer if it fits
@@ -488,7 +481,6 @@ int main()
 
 
         input.reset(); // closing input file
-        buf.reset(); // release bufer if no need
 
         chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
 
@@ -496,7 +488,10 @@ int main()
 
         //merging
         start = chrono::steady_clock::now();
+        buf.reset(); // release bufer if no need
         mergeSegmentsParallel<uint32_t>();
+        //mergeSegmentsByPairs<uint32_t>();
+        //mergeSegmentsDirectly<uint32_t>(buf.get(), bufSize);
 
         chrono::steady_clock::time_point endMerge = chrono::steady_clock::now();
 
