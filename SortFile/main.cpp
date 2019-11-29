@@ -434,10 +434,10 @@ unique_ptr<char[]> allocateMaxBuffer(size_t maxSize, size_t minSize, size_t* siz
             unique_ptr<char[]> buf(new char[*size]);
             if (buf)
                 return buf;
-            *size = 3 * (*size) / 4;
+            *size = (*size) / 2;
         }
         catch(std::bad_alloc&) {
-            *size = 3 * (*size) / 4;
+            *size = (*size) / 2;
         }
         catch(...) {
             throw;
@@ -563,7 +563,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
 
         if (!mergedSegmentsQuee.empty()) {
             sortedSegments = mergedSegmentsQuee;
-            cout << "Input's been read. Sorting 2nd level tree" << endl;
+            cout << "Input's been read. Sorting 2nd level queue" << endl;
             mergeSegmentsParallel(numOfThreads);
         }
 
@@ -599,7 +599,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
 
 int main()
 {
-    int res = sortFileStepByStep("input", "output", 4*kMegabyte,  4, 256);
+    int res = sortFileStepByStep("input", "output", 64*kMegabyte, 4, 512);
 
     return res;
 }
