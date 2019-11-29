@@ -118,7 +118,11 @@ void generateSortedSegmentsParallel(uint32_t* sortingBuffer, size_t bufferSize, 
     segSortEx = nullptr;
     const int workerBufSize = bufferSize / workersCount;
     for (int i = 0; i < workersCount; ++i)
-        sortWorkers[i] = thread(sortingSegmentWorker, sortingBuffer + i*workerBufSize, workerBufSize, input, maxSegmentsCount);
+        sortWorkers[i] = thread(sortingSegmentWorker,
+                                sortingBuffer + i*workerBufSize,
+                                workerBufSize,
+                                input,
+                                maxSegmentsCount);
     for (int i = 0; i < workersCount; ++i)
         if (sortWorkers[i].joinable())
             sortWorkers[i].join();
@@ -314,7 +318,6 @@ void mergeSortedFileWorker(int targetMerges)
         cout << "Thread " << this_thread::get_id() << " throwed exception" << endl;
         rethrow_exception(segMergeEx);
     }
-    cout << "Thread " << this_thread::get_id() << " finished" << endl;
 }
 
 // merges sortedSegments
@@ -558,9 +561,9 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
         input.reset(); // closing input file
         buf.reset(); // release bufer if no need
 
-        cout << "Input's been read. Sorting 2nd level tree" << endl;
         if (!mergedSegmentsQuee.empty()) {
             sortedSegments = mergedSegmentsQuee;
+            cout << "Input's been read. Sorting 2nd level tree" << endl;
             mergeSegmentsParallel(numOfThreads);
         }
 
@@ -596,10 +599,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
 
 int main()
 {
-
-    //int res = sortFileIn2Steps("input2", "output", 512*kKilobyte,  4);
-
-    int res = sortFileStepByStep("input", "output", 512*kKilobyte,  4, 256);
+    int res = sortFileStepByStep("input", "output", 4*kMegabyte,  4, 256);
 
     return res;
 }
