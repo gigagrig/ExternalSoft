@@ -7,7 +7,7 @@ int main(int argc, char* argv[])
     cout << "Hello World!" << endl;
 
     string filename("INPUT2");
-    int size = 1024*1024*64;
+    int size = 1024*1024*1024;
 
     FILE* f = fopen(filename.c_str(), "w+");
     if (!f) {
@@ -22,7 +22,7 @@ int main(int argc, char* argv[])
             cout << currentPercent  << "% done.\n";
             ++currentPercent;
         }
-        int32_t r = rand();
+        int32_t r = size - i;//rand();
         fwrite(&r, sizeof(r), 1, f);
     }
 
