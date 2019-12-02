@@ -107,7 +107,7 @@ void sortingSegmentWorker(uint32_t* buffer, size_t bufferSize, FILE* input, int 
 // sorts file parts to temp files
 // until file has been read or maxsegments count reached
 // TODO : (names saves to list sortedSegments) -> hide global var from API
-void generateSortedSegmentsParallel(uint32_t* sortingBuffer, size_t bufferSize, FILE* input,
+list<string> generateSortedSegmentsParallel(uint32_t* sortingBuffer, size_t bufferSize, FILE* input,
                                     int numOfThreads,
                                     int maxSegmentsCount = 64 * 1024) {
 
@@ -116,6 +116,7 @@ void generateSortedSegmentsParallel(uint32_t* sortingBuffer, size_t bufferSize, 
     isFileRead.store(false);
     segmentsCount = 0;
     segSortEx = nullptr;
+    sortedSegments.clear();
     const int workerBufSize = bufferSize / workersCount;
     for (int i = 0; i < workersCount; ++i)
         sortWorkers[i] = thread(sortingSegmentWorker,
@@ -130,6 +131,7 @@ void generateSortedSegmentsParallel(uint32_t* sortingBuffer, size_t bufferSize, 
     if (segSortEx) {
         rethrow_exception(segSortEx);
     }
+    return sortedSegments;
 }
 
 
@@ -322,17 +324,17 @@ void mergeSortedFileWorker(int targetMerges)
 
 // merges sortedSegments
 // if previousSegmentsFile is specified, it merges in the end.
-void mergeSegmentsParallel(int numOfThreads)
+void mergeSegmentsParallel(list<string>& segments, int numOfThreads)
 {
-    if (sortedSegments.size() <= 1) {
+    if (segments.size() <= 1) {
         return;
     }
 
+    sortedSegments = segments;
     int targetMerges = sortedSegments.size() - 1;
 
     segMergeEx = nullptr;
     merged.store(0);
-
     thread mergePool[numOfThreads];
     for (int i = 0; i < numOfThreads; ++i)
         mergePool[i] = thread(mergeSortedFileWorker, targetMerges);
@@ -342,6 +344,7 @@ void mergeSegmentsParallel(int numOfThreads)
     if (segMergeEx) {
         rethrow_exception(segMergeEx);
     }
+    segments = sortedSegments;
 }
 
 
@@ -486,7 +489,7 @@ int sortFileIn2Steps(const char* inputFile, const char* outputFile, size_t maxBu
         start = chrono::steady_clock::now();
         buf.reset(); // release bufer if no need
 
-        mergeSegmentsParallel(numOfThreads);
+        mergeSegmentsParallel(sortedSegments, numOfThreads);
 
         if (sortedSegments.empty())
             return 0;
@@ -523,9 +526,9 @@ int sortFileIn2Steps(const char* inputFile, const char* outputFile, size_t maxBu
 // 2) uniting segments to nextLevelQueue
 // repeats 1-2 until input's been read
 int sortFileStepByStep(const char* inputFile, const char* outputFile,
-                       size_t maxBufferSize, int numOfThreads, int sizeOfQueue)
+                       size_t maxBufferSize, int numOfThreads, size_t sizeOfQueue)
 {
-    list<string> mergedSegmentsQuee;
+    std::vector<list<string>> mergedSegmentsQuee(1);
     try {
         chrono::steady_clock::time_point start = chrono::steady_clock::now();
 
@@ -545,33 +548,58 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
         cout << bufSize << " bytes allocated for buffer" << endl;
 
         while (!feof(input.get())) {
-            generateSortedSegmentsParallel(reinterpret_cast<uint32_t*>(buf.get()),
+            mergedSegmentsQuee[0] = generateSortedSegmentsParallel(reinterpret_cast<uint32_t*>(buf.get()),
                                            bufSize / sizeof(uint32_t),
                                            input.get(),
                                            numOfThreads,
                                            sizeOfQueue);
+
             // merging
-            mergeSegmentsParallel(numOfThreads);
-            if (!sortedSegments.empty()) {
-                mergedSegmentsQuee.push_back(sortedSegments.front());
-                sortedSegments.pop_front();
+            size_t levelSize = mergedSegmentsQuee.size();
+            for(size_t level = 0; level < levelSize; level++) {
+                if (mergedSegmentsQuee[level].empty())
+                    continue;
+                if (level == 0 || mergedSegmentsQuee[level].size() >= sizeOfQueue) {
+                    cout << "Merging level " << level << " queue" << endl;
+                    mergeSegmentsParallel(mergedSegmentsQuee[level], numOfThreads);
+                    if (!mergedSegmentsQuee[level].empty()) {
+                        string merged = mergedSegmentsQuee[level].front();
+                        mergedSegmentsQuee[level].pop_front();
+                        if (level == levelSize - 1) {
+                            mergedSegmentsQuee.push_back(list<string>());
+                        }
+                        mergedSegmentsQuee[level+1].push_back(merged);
+                    }
+                }
             }
+
         }
 
         input.reset(); // closing input file
         buf.reset(); // release bufer if no need
 
-        if (!mergedSegmentsQuee.empty()) {
-            sortedSegments = mergedSegmentsQuee;
-            cout << "Input's been read. Sorting 2nd level queue" << endl;
-            mergeSegmentsParallel(numOfThreads);
+        // final  merging
+        size_t levelSize = mergedSegmentsQuee.size();
+        for(size_t level = 0; level < levelSize; level++) {
+            if (mergedSegmentsQuee[level].empty())
+                continue;
+            if (mergedSegmentsQuee[level].size() >= 1) {
+                cout << "Merging level " << level << " queue" << endl;
+                mergeSegmentsParallel(mergedSegmentsQuee[level], numOfThreads);
+                if (!mergedSegmentsQuee[level].empty() && level < levelSize - 1) {
+                    string merged = mergedSegmentsQuee[level].front();
+                    mergedSegmentsQuee[level].pop_front();
+                    mergedSegmentsQuee[level+1].push_back(merged);
+                }
+            }
         }
+
 
         chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
 
-        if (sortedSegments.empty())
-            return 0;
-        if (0 != rename(sortedSegments.front().c_str(), outputFile)) {
+
+        if (!mergedSegmentsQuee[levelSize-1].empty() &&
+                0 != rename(mergedSegmentsQuee[levelSize-1].front().c_str(), outputFile)) {
             cout << "Failed to create output file " << outputFile << endl;
         }
 
@@ -583,14 +611,16 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
     }
     catch (exception& ex) {
         cerr << ex.what() << endl;
-        clearTempFiles(sortedSegments);
-        clearTempFiles(mergedSegmentsQuee);
+        clearTempFiles(sortedSegments);        
+        for (size_t level = 0; level < mergedSegmentsQuee.size(); level++)
+            clearTempFiles(mergedSegmentsQuee[level]);
         return 3;
     }
     catch (...) {
         cerr << "Internal error : unhandled exception" << endl;
         clearTempFiles(sortedSegments);
-        clearTempFiles(mergedSegmentsQuee);
+        for (size_t level = 0; level < mergedSegmentsQuee.size(); level++)
+            clearTempFiles(mergedSegmentsQuee[level]);
         return 4;
     }
     return 0;
@@ -599,7 +629,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
 
 int main()
 {
-    int res = sortFileStepByStep("input", "output", 64*kMegabyte, 4, 512);
+    int res = sortFileStepByStep("input", "output", kMegabyte, 1, 1024);
 
     return res;
 }

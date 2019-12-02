@@ -7,17 +7,17 @@ int main(int argc, char* argv[])
     cout << "Hello World!" << endl;
 
     string filename("INPUT2");
-    int size = 1024*1024*1024;
+    size_t size = 256*1024*1024;
 
     FILE* f = fopen(filename.c_str(), "w+");
     if (!f) {
         cerr << "Failed to open file";
     }
 
-    int currentPercent = 1;
-    int onePervent = size / 100;
+    size_t currentPercent = 1;
+    size_t onePervent = size / 100;
 
-    for (int i = 0; i < size; ++i) {
+    for (size_t i = 0; i < size; ++i) {
         if (i > onePervent*currentPercent) {
             cout << currentPercent  << "% done.\n";
             ++currentPercent;
