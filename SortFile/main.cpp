@@ -52,16 +52,11 @@ mutex s_queeMutex; // mutex on queue of files
 }
 
 // uniqe filename (without path)
-// TODO: replace with more proper crossplatform function
 string genUniqueFilename() {
-    char nameBuf[L_tmpnam];
-    tmpnam(nameBuf);
-    string name(nameBuf);
-    // replacing /\ on .
-    size_t p = name.find_first_of("/""\"""");
-    for( ; p != string::npos; p = name.find_first_of("/""\"""")) {
-        name.replace(p, 1, ".");
-    }
+
+    static  atomic_uint_fast64_t chunkNum;
+
+    string name = string(".file.chunk.") + to_string(chunkNum.fetch_add(1));
     return name;
 }
 
@@ -668,6 +663,5 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
 int main()
 {
     int res = sortFileStepByStep("input", "output", kMegabyte*64u, 4, 256);
-    //cout <<  (checkIsSorted("output") ? "true" : "false") << endl;
     return res;
 }
