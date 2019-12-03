@@ -54,9 +54,10 @@ mutex s_queeMutex; // mutex on queue of files
 // uniqe filename (without path)
 string genUniqueFilename() {
 
-    static  atomic_uint_fast64_t chunkNum;
-
-    string name = string(".file.chunk.") + to_string(chunkNum.fetch_add(1));
+    static  atomic_uint_fast32_t chunkNum;
+    char buf[25];
+    sprintf(buf, ".tmp.chunk.%lu", chunkNum.fetch_add(1));
+    string name(buf);
     return name;
 }
 
