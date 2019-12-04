@@ -532,7 +532,7 @@ int sortFileIn2Steps(const char* inputFile, const char* outputFile, size_t maxBu
         }
         cout << bufSize << " bytes allocated for buffer" << endl;
 
-        genSortedSegments(reinterpret_cast<uint32_t*>(buf.get()),
+        list<string> segments = genSortedSegments(reinterpret_cast<uint32_t*>(buf.get()),
                                        bufSize / sizeof(uint32_t),
                                        input.get(),
                                        numOfThreads);
@@ -547,16 +547,16 @@ int sortFileIn2Steps(const char* inputFile, const char* outputFile, size_t maxBu
         //merging
         start = chrono::steady_clock::now();
 
-        mergeSegments(s_sortedSegments, buf.get(),  bufSize, numOfThreads);
-        //mergeSegmentsDirectly(buf.get(), bufSize);
+        mergeSegments(segments, buf.get(),  bufSize, numOfThreads);
+
         buf.reset(); // release bufer if no need
 
-        if (s_sortedSegments.empty())
+        if (segments.empty())
             return 0;
-        if (0 != rename(s_sortedSegments.front().c_str(), outputFile)) {
+        if (0 != rename(segments.front().c_str(), outputFile)) {
             cout << "Failed to create output file " << outputFile << endl;
         }
-        s_sortedSegments.pop_back();
+        segments.pop_back();
 
         chrono::steady_clock::time_point endMerge = chrono::steady_clock::now();
 
@@ -689,6 +689,6 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
 
 int main()
 {
-    int res = sortFileStepByStep("input", "output", kMegabyte*64u, 4, 256);
+    int res = sortFileStepByStep("input", "output", kMegabyte*112u, 1, 1024);
     return res;
 }
