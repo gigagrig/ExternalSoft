@@ -166,7 +166,8 @@ list<string> genSortedSegments(uint32_t* sortingBuffer, size_t bufferSize, FILE*
     return generateSortedSegments(sortingBuffer, bufferSize, input, maxSegmentsCount);
 }
 
-void mergeSortedFilesPair(const string& file1, const string& file2, const string& resultName)
+void mergeSortedFilesPair(const string& file1, const string& file2, const string& resultName,
+                          char *buf, size_t bufBytes)
 {
     auto f1 = makeUniqueHandler(file1.c_str(), "rb");
     auto f2 = makeUniqueHandler(file2.c_str(), "rb");
@@ -178,29 +179,52 @@ void mergeSortedFilesPair(const string& file1, const string& file2, const string
     if (!output) {
         throw SortAlgException("Failed to create temporary file while merging");
     }
-
-    uint32_t vals[2];
     FILE* descriptors[2] {f1.get(), f2.get()};
-    fread(vals, sizeof(uint32_t), 1, descriptors[0]);
-    fread(vals+1, sizeof(uint32_t), 1, descriptors[1]);
 
-    unsigned nextIdx = 0;
-    for(;;) {
-        nextIdx = 0;
-        if (vals[1] < vals[0])
-            nextIdx = 1;
-        fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
-        size_t read = fread(vals + nextIdx, sizeof(uint32_t), 1, descriptors[nextIdx]);
-        if (read == 0) {
-            break;
+    char* rBuf0 = buf;
+    size_t bufTypedsize = (bufBytes / 4) / sizeof(uint32_t);
+    char* rBuf1 = buf + bufTypedsize * sizeof(uint32_t);
+    uint32_t* outbuf = (uint32_t*)(buf + 2 * bufTypedsize * sizeof(uint32_t));
+    size_t merged = 0;
+    uint32_t* it0 = 0;
+    uint32_t* it1 = 0;
+    size_t read0 = fread(rBuf0, sizeof(uint32_t), bufTypedsize, descriptors[0]);
+    size_t read1 = fread(rBuf1, sizeof(uint32_t), bufTypedsize, descriptors[1]);
+    while (read0 > 0 && read1 > 0) {
+        if (it0 == 0)
+            it0 = (uint32_t*)rBuf0;
+        if (it1 == 0)
+            it1 = (uint32_t*)rBuf1;
+        while (read0 > 0 && read1 > 0) {
+            if (*it0 <= *it1) {
+                outbuf[merged] = *it0;
+                read0--;
+                it0++;
+                merged++;
+            } else {
+                outbuf[merged] = *it1;
+                read1--;
+                it1++;
+                merged++;
+            }
+        }
+        fwrite(outbuf, sizeof(uint32_t), merged, outDesc);
+        merged = 0;
+
+        if (read0 == 0) {
+            read0 = fread(rBuf0, sizeof(uint32_t), bufTypedsize, descriptors[0]);
+            it0 = 0;
+        }
+        if (read1 == 0) {
+            read1 = fread(rBuf1, sizeof(uint32_t), bufTypedsize, descriptors[1]);
+            it1 = 0;
         }
     }
 
-    // writing the remaining data in another stream
-    nextIdx = (nextIdx + 1) % 2;
-    fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
-    while (0 < fread(vals + nextIdx, sizeof(uint32_t), 1, descriptors[nextIdx])) {
-        fwrite(vals + nextIdx, sizeof(uint32_t), 1, outDesc);
+    if (read0 > 0 || read1 > 0) {
+        uint32_t* it = read0 > 0 ? it0 : it1;
+        size_t count = read0 > 0 ? read0 : read1;
+        fwrite(it, sizeof(uint32_t), count, outDesc);
     }
 }
 
@@ -281,7 +305,7 @@ void mergeSortedFiles(const vector<string>& files, const string& resultName, cha
 }
 
 
-void mergeSortedFileWorker(int targetMerges)
+void mergeSortedFileWorker(int targetMerges, char* mergeBuf, size_t bufsize)
 {
     string f1;
     string f2;
@@ -306,7 +330,7 @@ void mergeSortedFileWorker(int targetMerges)
                  << " to " << resFile
                  << " (" << currentMerge << " of " << targetMerges << ')' << endl;
 
-            mergeSortedFilesPair(f1, f2, resFile);
+            mergeSortedFilesPair(f1, f2, resFile, mergeBuf, bufsize);
 
             queueLocker.lock();
             s_sortedSegments.push_back(resFile);
@@ -335,7 +359,7 @@ void mergeSortedFileWorker(int targetMerges)
 
 // merges sortedSegments
 // if previousSegmentsFile is specified, it merges in the end.
-void mergeSegmentsParallel(list<string>& segments, int numOfThreads)
+void mergeSegmentsParallel(list<string>& segments, char* mergebuf, size_t bufsize, int numOfThreads)
 {
     if (segments.size() <= 1) {
         return;
@@ -347,8 +371,11 @@ void mergeSegmentsParallel(list<string>& segments, int numOfThreads)
     s_segMergeEx = nullptr;
     s_merged.store(0);
     thread mergePool[numOfThreads];
-    for (int i = 0; i < numOfThreads; ++i)
-        mergePool[i] = thread(mergeSortedFileWorker, targetMerges);
+    size_t workerBufSize = bufsize / numOfThreads;
+    for (int i = 0; i < numOfThreads; ++i) {
+        char* workerBuf = mergebuf + i*workerBufSize;
+        mergePool[i] = thread(mergeSortedFileWorker, targetMerges, workerBuf, workerBufSize);
+    }
     for (int i = 0; i < numOfThreads; ++i)
         if (mergePool[i].joinable())
             mergePool[i].join();
@@ -359,7 +386,7 @@ void mergeSegmentsParallel(list<string>& segments, int numOfThreads)
 }
 
 
-void mergeSegmentsByPairs(list<string>& segments)
+void mergeSegmentsByPairs(list<string>& segments, char* mergebuf, size_t bufsize)
 {
     int targetMerges = segments.size() - 1;
     int currentMerge = 0;
@@ -374,7 +401,7 @@ void mergeSegmentsByPairs(list<string>& segments)
         cout << "Merging " << f1 << " and " << f2
              << " to " << resFile
              << " (" << currentMerge << " of " << targetMerges << ')' << endl;
-        mergeSortedFilesPair(f1, f2, resFile);
+        mergeSortedFilesPair(f1, f2, resFile, mergebuf, bufsize);
         segments.push_back(resFile);
         remove(f1.c_str());
         remove(f2.c_str());
@@ -414,12 +441,12 @@ void mergeSegmentsDirectly(char* buffer, size_t bufSize)
     }
 }
 
-void mergeSegments(list<string>& segments, int numOfThreads)
+void mergeSegments(list<string>& segments, char* mergebuf, size_t bufsize, int numOfThreads)
 {
     if (numOfThreads > 1) {
-        mergeSegmentsParallel(segments, numOfThreads);
+        mergeSegmentsParallel(segments, mergebuf, bufsize, numOfThreads);
     } else {
-        mergeSegmentsByPairs(segments);
+        mergeSegmentsByPairs(segments, mergebuf, bufsize);
     }
 }
 
@@ -520,7 +547,7 @@ int sortFileIn2Steps(const char* inputFile, const char* outputFile, size_t maxBu
         //merging
         start = chrono::steady_clock::now();
 
-        mergeSegments(s_sortedSegments, numOfThreads);
+        mergeSegments(s_sortedSegments, buf.get(),  bufSize, numOfThreads);
         //mergeSegmentsDirectly(buf.get(), bufSize);
         buf.reset(); // release bufer if no need
 
@@ -595,7 +622,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
                     continue;
                 if (level == 0 || mergedSegmentsQuee[level].size() >= sizeOfQueue) {
                     cout << "Merging level " << level << " queue" << endl;
-                    mergeSegments(mergedSegmentsQuee[level], numOfThreads);
+                    mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, numOfThreads);
                     if (!mergedSegmentsQuee[level].empty()) {
                         string merged = mergedSegmentsQuee[level].front();
                         mergedSegmentsQuee[level].pop_front();
@@ -610,7 +637,6 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
         }
 
         input.reset(); // closing input file
-        buf.reset(); // release bufer if no need
 
         // final  merging
         size_t levelSize = mergedSegmentsQuee.size();
@@ -619,7 +645,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
                 continue;
             if (mergedSegmentsQuee[level].size() >= 1) {
                 cout << "Merging level " << level << " queue" << endl;
-                mergeSegments(mergedSegmentsQuee[level], numOfThreads);
+                mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, numOfThreads);
                 if (!mergedSegmentsQuee[level].empty() && level < levelSize - 1) {
                     string merged = mergedSegmentsQuee[level].front();
                     mergedSegmentsQuee[level].pop_front();
@@ -628,8 +654,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
             }
         }
 
-
-        chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+        //buf.reset(); // release bufer if no need
 
 
         if (!mergedSegmentsQuee[levelSize-1].empty() &&
@@ -637,6 +662,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
             cout << "Failed to create output file " << outputFile << endl;
         }
 
+        chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
         auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
 
         cout << "Sorting took "
