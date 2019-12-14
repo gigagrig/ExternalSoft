@@ -493,10 +493,7 @@ unique_ptr<char[]> allocateMaxBuffer(size_t maxSize, size_t minSize, size_t* siz
         try {
             if (*size < minSize)
                 return unique_ptr<char[]>();
-            unique_ptr<char[]> buf(new char[*size]);
-            if (buf)
-                return buf;
-            *size = (*size) / 2;
+            return unique_ptr<char[]>(new char[*size]);
         }
         catch(std::bad_alloc&) {
             *size = (*size) / 2;
@@ -622,7 +619,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
                     continue;
                 if (level == 0 || mergedSegmentsQuee[level].size() >= sizeOfQueue) {
                     cout << "Merging level " << level << " queue" << endl;
-                    mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, numOfThreads);
+                    mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, 1);
                     if (!mergedSegmentsQuee[level].empty()) {
                         string merged = mergedSegmentsQuee[level].front();
                         mergedSegmentsQuee[level].pop_front();
@@ -645,7 +642,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
                 continue;
             if (mergedSegmentsQuee[level].size() >= 1) {
                 cout << "Merging level " << level << " queue" << endl;
-                mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, numOfThreads);
+                mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, 1);
                 if (!mergedSegmentsQuee[level].empty() && level < levelSize - 1) {
                     string merged = mergedSegmentsQuee[level].front();
                     mergedSegmentsQuee[level].pop_front();
@@ -689,6 +686,6 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
 
 int main()
 {
-    int res = sortFileStepByStep("input", "output", kMegabyte*112u, 1, 1024);
+    int res = sortFileStepByStep("input", "output_res", kMegabyte*64, 4, 1024);
     return res;
 }
