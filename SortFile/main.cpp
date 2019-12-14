@@ -57,8 +57,7 @@ string genUniqueFilename() {
     static  atomic_uint_fast32_t chunkNum;
     char buf[25];
     sprintf(buf, ".tmp.chunk.%lu", chunkNum.fetch_add(1));
-    string name(buf);
-    return name;
+    return string(buf);
 }
 
 // worker that sorts segments of file INPUT
@@ -683,9 +682,90 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
     return 0;
 }
 
+#include <fstream>
+
+
+void countAndWrite(ifstream& inp, ofstream out, uint8_t msB){
+
+}
+
+int sortByCounters(const char* inputFile, const char* outputFile)
+{
+    chrono::steady_clock::time_point start = chrono::steady_clock::now();
+
+    ifstream inp(inputFile, ios_base::binary | ios_base::in);
+
+    if (!inp.is_open()) {
+        cerr << "Failed to open " << inputFile << " file." << endl;
+        return 1;
+    }
+
+    vector<string> names(256);
+    for (size_t i = 0; i < names.size(); i++) {
+        names[i] = genUniqueFilename();
+    }
+    vector <ofstream> streams(256);
+    for (size_t i = 0; i < names.size(); i++) {
+        streams[i].open(names[i], ios_base::binary | ios_base::out | ios_base::trunc);
+        if (!streams[i].is_open()) {
+            cerr << "Failed to open " << streams[i] << " file." << endl;
+            return 2;
+        }
+    }
+
+    size_t bufSize;
+    unique_ptr<char[]> buf = allocateMaxBuffer(64*kMegabyte, 64*kMegabyte,  &bufSize);
+    if (!buf) {
+        cout << "Not enough RAM to sort file." << endl;
+        return 2;
+    }
+    cout << bufSize << " bytes allocated for buffer" << endl;
+
+    uint32_t* value = (uint32_t*)buf.get();
+    for(;;) {
+        streamsize read = inp.read((char*)value, bufSize).gcount() / sizeof(uint32_t);
+        if (read == 0) {
+            break;
+        }
+        for(size_t i = 0; i < read; i++) {
+            uint8_t msByte = value[i] >> 24;
+            streams[msByte].write((char*)&value, sizeof(uint32_t));
+        }
+    }
+
+
+    for (size_t i = 0; i < names.size(); i++) {
+        streams[i].close();
+        streams[i].open(names[i], ios_base::binary | ios_base::in);
+        if (!streams[i].is_open()) {
+            cerr << "Failed to open " << streams[i] << " file." << endl;
+            break;
+        }
+
+
+
+
+        streams[i].close();
+    }
+
+    for (size_t i = 0; i < names.size(); i++) {
+        remove(names[i].c_str());
+    }
+
+    chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+    auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
+
+    cout << "Sorting took "
+              << sortDurationMs
+              << "ms." << endl;
+
+
+    return 0;
+}
 
 int main()
 {
-    int res = sortFileStepByStep("input", "output_res", kMegabyte*64, 4, 1024);
+    //int res = sortByCounters("input", "output");
+    int res = sortFileStepByStep("input", "output", 64*kMegabyte, 4, 1024);
     return res;
 }
