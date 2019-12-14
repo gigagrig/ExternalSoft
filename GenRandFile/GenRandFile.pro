@@ -7,4 +7,3 @@ CONFIG -= qt
 SOURCES += \
         main.cpp
 
-LIBS += pthread
