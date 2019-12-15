@@ -618,7 +618,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
                     continue;
                 if (level == 0 || mergedSegmentsQuee[level].size() >= sizeOfQueue) {
                     cout << "Merging level " << level << " queue" << endl;
-                    mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, 4);
+                    mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, numOfThreads);
                     if (!mergedSegmentsQuee[level].empty()) {
                         string merged = mergedSegmentsQuee[level].front();
                         mergedSegmentsQuee[level].pop_front();
@@ -641,7 +641,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
                 continue;
             if (mergedSegmentsQuee[level].size() >= 1) {
                 cout << "Merging level " << level << " queue" << endl;
-                mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, 4);
+                mergeSegments(mergedSegmentsQuee[level], buf.get(), bufSize, numOfThreads);
                 if (!mergedSegmentsQuee[level].empty() && level < levelSize - 1) {
                     string merged = mergedSegmentsQuee[level].front();
                     mergedSegmentsQuee[level].pop_front();
@@ -691,7 +691,7 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
 void countAndWrite(ofstream& out, string inputName, uint32_t msb,
                    char* buf, char* readBuf, size_t readBufSize)
 {
-    cout << "Counting msb " << msb << ", file " << inputName << endl;
+    cout << "Counting for msb " << msb << ", file " << inputName << endl;
     ifstream inp(inputName, ios_base::binary | ios_base::in);
     if (!inp.is_open()) {
         cerr << "Failed to open " << inputName << " file." << endl;
@@ -704,16 +704,21 @@ void countAndWrite(ofstream& out, string inputName, uint32_t msb,
 
 
     uint32_t* inputValues = (uint32_t*)readBuf;
+    bool hasValues = false;
     for(;;) {
         streamsize read = inp.read(readBuf, readBufSize).gcount() / sizeof(uint32_t);
         if (read == 0) {
             break;
         }
+        hasValues = true;
         for(streamsize i = 0; i < read; i++) {
             uint32_t val = inputValues[i] & 0x00ffffffu;
             (*counters)[val] += 1;
         }
     }
+
+    if (!hasValues)
+        return;
 
     size_t writeBufItemsSize = readBufSize / sizeof(uint32_t);
     uint32_t *items = (uint32_t*)readBuf;
@@ -773,7 +778,7 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     }
     cout << kBufSize << " bytes allocated for buffer" << endl;
 
-    constexpr size_t kReadBufSize =  64 * kKilobyte;
+    constexpr size_t kReadBufSize =  16 * kKilobyte;
     unique_ptr<char[]> readBuf = allocateMaxBuffer(kReadBufSize, kReadBufSize,  &tmp);
     if (!readBuf) {
         cout << "Not enough RAM to sort file." << endl;
@@ -796,7 +801,7 @@ int sortByCounters(const char* inputFile, const char* outputFile)
             break;
         }
         readSum += read*sizeof(uint32_t);
-        if (readSum % 64*kMegabyte == 0) {
+        if (readSum % (64*kMegabyte) == 0) {
             cout << readSum / kMegabyte << " MB " << "read" << endl;
         }
         for(streamsize i = 0; i < read; i++) {
@@ -812,6 +817,8 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     for (uint32_t msByte = 0; msByte < 256u; msByte++) {
         streams[msByte].write((char*)(*writeBuffers)[msByte], sizeof(uint32_t) * addCounters[msByte]);
     }
+
+    chrono::steady_clock::time_point endSplit = chrono::steady_clock::now();
 
 
 
@@ -829,7 +836,12 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     }
 
     chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+    auto splitDurationMs = chrono::duration_cast<chrono::milliseconds>(endSplit - start).count();
     auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
+
+    cout << "Splitting by msb took "
+              << splitDurationMs
+              << "ms." << endl;
 
     cout << "Sorting took "
               << sortDurationMs
@@ -842,6 +854,6 @@ int sortByCounters(const char* inputFile, const char* outputFile)
 int main()
 {
     int res = sortByCounters("input", "output");
-    //int res = sortFileStepByStep("input", "output_res", 128*kMegabyte, 4, 1024);
+    //int res = sortFileStepByStep("input", "output_res", 112*kMegabyte, 1, 1024);
     return res;
 }

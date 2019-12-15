@@ -22,7 +22,7 @@ int main(int argc, char* argv[])
             cout << currentPercent  << "% done.\n";
             ++currentPercent;
         }
-        int32_t r = rand();
+        int32_t r = rand() * rand();
         fwrite(&r, sizeof(r), 1, f);
     }
 
