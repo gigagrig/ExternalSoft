@@ -7,6 +7,9 @@
 #include <mutex>
 #include <vector>
 #include <thread>
+#include <fstream>
+#include <cstring>
+
 
 
 using namespace std;
@@ -682,14 +685,17 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
     return 0;
 }
 
-#include <fstream>
-#include <cstring>
 
-
+void clearTempFiles(const vector<string>& tempFiles)
+{
+    for (size_t i = 0; i < tempFiles.size(); i++) {
+        remove(tempFiles[i].c_str());
+    }
+}
 
 
 void countAndWrite(ofstream& out, string inputName, uint32_t msb,
-                   char* buf, char* readBuf, size_t readBufSize)
+                   char* countersBuf, char* ioBuf, size_t ioBufSize)
 {
     cout << "Counting for msb " << msb << ", file " << inputName << endl;
     ifstream inp(inputName, ios_base::binary | ios_base::in);
@@ -700,13 +706,13 @@ void countAndWrite(ofstream& out, string inputName, uint32_t msb,
 
     constexpr size_t kMax24bitValue = 0x00ffffffu;
     uint32_t (*counters)[kMax24bitValue + 1];
-    counters = (decltype(counters))buf;
+    counters = (decltype(counters))countersBuf;
 
 
-    uint32_t* inputValues = (uint32_t*)readBuf;
+    uint32_t* inputValues = (uint32_t*)ioBuf;
     bool hasValues = false;
     for(;;) {
-        streamsize read = inp.read(readBuf, readBufSize).gcount() / sizeof(uint32_t);
+        streamsize read = inp.read(ioBuf, ioBufSize).gcount() / sizeof(uint32_t);
         if (read == 0) {
             break;
         }
@@ -720,8 +726,8 @@ void countAndWrite(ofstream& out, string inputName, uint32_t msb,
     if (!hasValues)
         return;
 
-    size_t writeBufItemsSize = readBufSize / sizeof(uint32_t);
-    uint32_t *items = (uint32_t*)readBuf;
+    size_t writeBufItemsSize = ioBufSize / sizeof(uint32_t);
+    uint32_t *items = (uint32_t*)ioBuf;
     uint32_t buffered = 0;
     uint32_t count;
     uint32_t mask = msb << 24;
@@ -737,12 +743,12 @@ void countAndWrite(ofstream& out, string inputName, uint32_t msb,
             buffered++;
             count--;
             if (buffered == writeBufItemsSize) {
-                out.write((char*)items, readBufSize);
+                out.write((char*)items, ioBufSize);
                 buffered = 0;
             }
         }
     }
-    out.write(readBuf, buffered*sizeof(uint32_t));
+    out.write(ioBuf, buffered*sizeof(uint32_t));
 }
 
 int sortByCounters(const char* inputFile, const char* outputFile)
@@ -756,19 +762,6 @@ int sortByCounters(const char* inputFile, const char* outputFile)
         return 1;
     }
 
-    vector<string> names(256);
-    for (size_t i = 0; i < names.size(); i++) {
-        names[i] = genUniqueFilename();
-    }
-    ofstream streams[256];
-    for (size_t i = 0; i < names.size(); i++) {
-        streams[i].open(names[i], ios_base::binary | ios_base::out | ios_base::trunc);
-        if (!streams[i].is_open()) {
-            cerr << "Failed to open " << streams[i] << " file." << endl;
-            return 2;
-        }
-    }
-
     constexpr size_t kBufSize = 64*kMegabyte;
     size_t tmp;
     unique_ptr<char[]> buf = allocateMaxBuffer(64*kMegabyte, 64*kMegabyte, &tmp);
@@ -778,13 +771,28 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     }
     cout << kBufSize << " bytes allocated for buffer" << endl;
 
-    constexpr size_t kReadBufSize =  16 * kKilobyte;
-    unique_ptr<char[]> readBuf = allocateMaxBuffer(kReadBufSize, kReadBufSize,  &tmp);
-    if (!readBuf) {
+    constexpr size_t kIoBufSize =  16 * kKilobyte;
+    unique_ptr<char[]> ioBuf = allocateMaxBuffer(kIoBufSize, kIoBufSize,  &tmp);
+    if (!ioBuf) {
         cout << "Not enough RAM to sort file." << endl;
         return 2;
     }
-    cout << kReadBufSize << " bytes allocated for read buffer" << endl;
+    cout << kIoBufSize << " bytes allocated for read buffer" << endl;
+
+
+    vector<string> tmpNames(256);
+    for (size_t i = 0; i < tmpNames.size(); i++) {
+        tmpNames[i] = genUniqueFilename();
+    }
+    ofstream streams[256];
+    for (size_t i = 0; i < tmpNames.size(); i++) {
+        streams[i].open(tmpNames[i], ios_base::binary | ios_base::out | ios_base::trunc);
+        if (!streams[i].is_open()) {
+            cerr << "Failed to open " << tmpNames[i] << " file." << endl;
+            clearTempFiles(tmpNames);
+            return 2;
+        }
+    }
 
     constexpr uint32_t kWriteBufItemsSize = kBufSize/(256*sizeof(uint32_t));
     uint32_t (*writeBuffers)[256][kWriteBufItemsSize];
@@ -793,10 +801,10 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     memset(addCounters, 0, sizeof(addCounters));
 
 
-    uint32_t* inputValues = (uint32_t*)readBuf.get();
+    uint32_t* inputValues = (uint32_t*)ioBuf.get();
     streamsize readSum = 0;
     for(;;) {
-        streamsize read = inp.read((char*)inputValues, kReadBufSize).gcount() / sizeof(uint32_t);
+        streamsize read = inp.read((char*)inputValues, kIoBufSize).gcount() / sizeof(uint32_t);
         if (read == 0) {
             break;
         }
@@ -824,16 +832,14 @@ int sortByCounters(const char* inputFile, const char* outputFile)
 
     ofstream out(outputFile, ios_base::binary | ios_base::out | ios_base::trunc);
     memset(buf.get(), 0, kBufSize);
-    for (size_t i = 0; i < names.size(); i++) {
+    for (size_t i = 0; i < tmpNames.size(); i++) {
         streams[i].close();
-        countAndWrite(out, names[i], i, buf.get(), readBuf.get(), kReadBufSize);
+        countAndWrite(out, tmpNames[i], i, buf.get(), ioBuf.get(), kIoBufSize);
     }
 
     out.close();
 
-    for (size_t i = 0; i < names.size(); i++) {
-        remove(names[i].c_str());
-    }
+    clearTempFiles(tmpNames);
 
     chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
     auto splitDurationMs = chrono::duration_cast<chrono::milliseconds>(endSplit - start).count();
@@ -850,6 +856,7 @@ int sortByCounters(const char* inputFile, const char* outputFile)
 
     return 0;
 }
+
 
 int main()
 {
