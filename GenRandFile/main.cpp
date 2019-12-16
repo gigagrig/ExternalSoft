@@ -7,7 +7,7 @@ int main(int argc, char* argv[])
     cout << "Hello World!" << endl;
 
     string filename("INPUT2");
-    size_t size = 256*1024*1024;
+    size_t size = 6*256*1024*1024;
 
     FILE* f = fopen(filename.c_str(), "w+");
     if (!f) {

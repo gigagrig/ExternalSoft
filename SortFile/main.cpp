@@ -133,7 +133,7 @@ list<string> generateSortedSegmentsParallel(uint32_t* sortingBuffer, size_t buff
 }
 
 
-list<string> generateSortedSegments(uint32_t* sortingBuffer, size_t bufferSize,
+list<string> generateSortedSegmentsWithoutMerge(uint32_t* sortingBuffer, size_t bufferSize,
                                     FILE* input, size_t maxSegmentsCount = 64 * 1024)
 {
     int chunk = 0;
@@ -151,6 +151,44 @@ list<string> generateSortedSegments(uint32_t* sortingBuffer, size_t bufferSize,
             throw SortAlgException("Failed to create temporary file while sorting segments."); //
         }
         fwrite(sortingBuffer, sizeof(uint32_t),  readCount, output.get());
+        segments.push_back(chunkName);
+    }
+    return segments;
+}
+
+list<string> generateSortedSegments(uint32_t* sortingBuffer, size_t bufferSize,
+                                    FILE* input, size_t maxSegmentsCount = 64 * 1024)
+{
+    int chunk = 0;
+    list<string> segments;
+    while(segments.size() < maxSegmentsCount) {
+        //input.read((char*)sortingBuffer, bufferSize * sizeof(uint32_t));
+        //size_t readCount = input.gcount() / sizeof(uint32_t);
+        size_t readCount = fread((char*)sortingBuffer, sizeof(uint32_t), bufferSize, input);
+        if (readCount == 0) {
+            return segments;
+        }
+        //sort(sortingBuffer, sortingBuffer + readCount);
+        thread s1(sort<uint32_t*>, sortingBuffer, sortingBuffer + readCount / 4);
+        thread s2(sort<uint32_t*>, sortingBuffer + readCount / 4, sortingBuffer + 2*readCount / 4);
+        thread s3(sort<uint32_t*>, sortingBuffer + 2*readCount / 4, sortingBuffer + 3*readCount / 4);
+        sort<uint32_t*>(sortingBuffer + 3*readCount / 4, sortingBuffer + readCount);
+        s1.join();
+        s2.join();
+        s3.join();
+        s1 = thread(inplace_merge<uint32_t*>, sortingBuffer, sortingBuffer + readCount / 4, sortingBuffer + 2*readCount / 4);
+        //inplace_merge<uint32_t*>(sortingBuffer, sortingBuffer + readCount / 4, sortingBuffer + 2*readCount / 4);
+        inplace_merge(sortingBuffer + 2*readCount / 4, sortingBuffer + 3*readCount / 4, sortingBuffer + readCount);
+        s1.join();
+        inplace_merge(sortingBuffer, sortingBuffer + readCount / 2, sortingBuffer + readCount);
+
+        cout << "chunk " << ++chunk << " sorted" << endl;
+        string chunkName =  genUniqueFilename();
+        ofstream output(chunkName.c_str(), ios_base::out | ios_base::binary | ios_base::trunc);
+        if (!output.is_open()) {
+            throw SortAlgException("Failed to create temporary file while sorting segments."); //
+        }
+        output.write((char*)sortingBuffer, sizeof(uint32_t)*readCount);
         segments.push_back(chunkName);
     }
     return segments;
@@ -825,6 +863,9 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     for (uint32_t msByte = 0; msByte < 256u; msByte++) {
         streams[msByte].write((char*)(*writeBuffers)[msByte], sizeof(uint32_t) * addCounters[msByte]);
     }
+    for (size_t i = 0; i < tmpNames.size(); i++) {
+        streams[i].close();
+    }
 
     chrono::steady_clock::time_point endSplit = chrono::steady_clock::now();
 
@@ -833,7 +874,6 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     ofstream out(outputFile, ios_base::binary | ios_base::out | ios_base::trunc);
     memset(buf.get(), 0, kBufSize);
     for (size_t i = 0; i < tmpNames.size(); i++) {
-        streams[i].close();
         countAndWrite(out, tmpNames[i], i, buf.get(), ioBuf.get(), kIoBufSize);
     }
 
@@ -861,6 +901,6 @@ int sortByCounters(const char* inputFile, const char* outputFile)
 int main()
 {
     int res = sortByCounters("input", "output");
-    //int res = sortFileStepByStep("input", "output_res", 112*kMegabyte, 1, 1024);
+    //int res = sortFileStepByStep("input", "output_res", 112*kMegabyte, 4, 1024);
     return res;
 }
