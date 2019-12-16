@@ -1,12 +1,8 @@
-#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <list>
 #include <iostream>
 #include <memory>
-#include <mutex>
 #include <vector>
-#include <thread>
 #include <fstream>
 #include <cstring>
 
@@ -67,8 +63,9 @@ void countAndWrite(ofstream& out, string inputName, uint32_t msb,
     }
 
     constexpr size_t kMax24bitValue = 0x00ffffffu;
-    uint32_t (*counters)[kMax24bitValue + 1];
-    counters = (decltype(counters))countersBuf;
+    //uint32_t (*counters)[kMax24bitValue + 1];
+    //counters = (decltype(counters))countersBuf;
+    uint32_t* counters = (uint32_t*)countersBuf;
 
 
     uint32_t* inputValues = (uint32_t*)ioBuf;
@@ -81,7 +78,7 @@ void countAndWrite(ofstream& out, string inputName, uint32_t msb,
         hasValues = true;
         for(streamsize i = 0; i < read; i++) {
             uint32_t val = inputValues[i] & 0x00ffffffu;
-            (*counters)[val] += 1;
+            counters[val] += 1;
         }
     }
 
@@ -94,11 +91,11 @@ void countAndWrite(ofstream& out, string inputName, uint32_t msb,
     uint32_t count;
     uint32_t mask = msb << 24;
     for (uint32_t i = 0; i <= kMax24bitValue; i++) {
-        if ((*counters)[i] == 0) {
+        if (counters[i] == 0) {
             continue;
         }
-        count = (*counters)[i];
-        (*counters)[i] = 0;
+        count = counters[i];
+        counters[i] = 0;
         uint32_t number = i | mask;
         while (count > 0) {
             items[buffered] = number;
@@ -133,7 +130,7 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     }
     cout << kBufSize << " bytes allocated for buffer" << endl;
 
-    constexpr size_t kIoBufSize =  16 * kKilobyte;
+    constexpr size_t kIoBufSize =  64 * kKilobyte;
     unique_ptr<char[]> ioBuf = allocateMaxBuffer(kIoBufSize, kIoBufSize,  &tmp);
     if (!ioBuf) {
         cout << "Not enough RAM to sort file." << endl;
@@ -187,6 +184,9 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     for (uint32_t msByte = 0; msByte < 256u; msByte++) {
         streams[msByte].write((char*)(*writeBuffers)[msByte], sizeof(uint32_t) * addCounters[msByte]);
     }
+    for (size_t i = 0; i < tmpNames.size(); i++) {
+        streams[i].close();
+    }
 
     chrono::steady_clock::time_point endSplit = chrono::steady_clock::now();
 
@@ -195,7 +195,6 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     ofstream out(outputFile, ios_base::binary | ios_base::out | ios_base::trunc);
     memset(buf.get(), 0, kBufSize);
     for (size_t i = 0; i < tmpNames.size(); i++) {
-        streams[i].close();
         countAndWrite(out, tmpNames[i], i, buf.get(), ioBuf.get(), kIoBufSize);
     }
 
