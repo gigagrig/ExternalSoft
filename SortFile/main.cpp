@@ -156,6 +156,22 @@ list<string> generateSortedSegmentsWithoutMerge(uint32_t* sortingBuffer, size_t 
     return segments;
 }
 
+void sortParralel(uint32_t* sortingBuffer, size_t size)
+{
+    thread s1(sort<uint32_t*>, sortingBuffer, sortingBuffer + size / 4);
+    thread s2(sort<uint32_t*>, sortingBuffer + size / 4, sortingBuffer + 2*size / 4);
+    thread s3(sort<uint32_t*>, sortingBuffer + 2*size / 4, sortingBuffer + 3*size / 4);
+    sort<uint32_t*>(sortingBuffer + 3*size / 4, sortingBuffer + size);
+    s1.join();
+    s2.join();
+    s3.join();
+    //s1 = thread(inplace_merge<uint32_t*>, sortingBuffer, sortingBuffer + size / 4, sortingBuffer + 2*size / 4);
+    inplace_merge<uint32_t*>(sortingBuffer, sortingBuffer + size / 4, sortingBuffer + 2*size / 4);
+    inplace_merge(sortingBuffer + 2*size / 4, sortingBuffer + 3*size / 4, sortingBuffer + size);
+    //s1.join();
+    inplace_merge(sortingBuffer, sortingBuffer + size / 2, sortingBuffer + size);
+}
+
 list<string> generateSortedSegments(uint32_t* sortingBuffer, size_t bufferSize,
                                     FILE* input, size_t maxSegmentsCount = 64 * 1024)
 {
@@ -169,18 +185,7 @@ list<string> generateSortedSegments(uint32_t* sortingBuffer, size_t bufferSize,
             return segments;
         }
         //sort(sortingBuffer, sortingBuffer + readCount);
-        thread s1(sort<uint32_t*>, sortingBuffer, sortingBuffer + readCount / 4);
-        thread s2(sort<uint32_t*>, sortingBuffer + readCount / 4, sortingBuffer + 2*readCount / 4);
-        thread s3(sort<uint32_t*>, sortingBuffer + 2*readCount / 4, sortingBuffer + 3*readCount / 4);
-        sort<uint32_t*>(sortingBuffer + 3*readCount / 4, sortingBuffer + readCount);
-        s1.join();
-        s2.join();
-        s3.join();
-        s1 = thread(inplace_merge<uint32_t*>, sortingBuffer, sortingBuffer + readCount / 4, sortingBuffer + 2*readCount / 4);
-        //inplace_merge<uint32_t*>(sortingBuffer, sortingBuffer + readCount / 4, sortingBuffer + 2*readCount / 4);
-        inplace_merge(sortingBuffer + 2*readCount / 4, sortingBuffer + 3*readCount / 4, sortingBuffer + readCount);
-        s1.join();
-        inplace_merge(sortingBuffer, sortingBuffer + readCount / 2, sortingBuffer + readCount);
+        sortParralel(sortingBuffer, readCount);
 
         cout << "chunk " << ++chunk << " sorted" << endl;
         string chunkName =  genUniqueFilename();
@@ -789,7 +794,30 @@ void countAndWrite(ofstream& out, string inputName, uint32_t msb,
     out.write(ioBuf, buffered*sizeof(uint32_t));
 }
 
-int sortByCounters(const char* inputFile, const char* outputFile)
+void sortAndWrite(ofstream& out, string inputName, uint32_t msb,
+                    char* ioBuf, size_t ioBufSize)
+{
+    cout << "Sorting for msb " << msb << ", file " << inputName << endl;
+    ifstream inp(inputName, ios_base::binary | ios_base::in);
+    if (!inp.is_open()) {
+        cerr << "Failed to open " << inputName << " file." << endl;
+        return;
+    }
+
+
+    uint32_t* inputValues = (uint32_t*)ioBuf;
+    streamsize read = inp.read(ioBuf, ioBufSize).gcount() / sizeof(uint32_t);
+    if (read == 0) {
+        return;
+    }
+
+    sortParralel(inputValues, read);
+    //sort(inputValues, inputValues + read);
+
+    out.write(ioBuf, read*sizeof(uint32_t));
+}
+
+int sortByBuckets(const char* inputFile, const char* outputFile)
 {
     chrono::steady_clock::time_point start = chrono::steady_clock::now();
 
@@ -815,7 +843,7 @@ int sortByCounters(const char* inputFile, const char* outputFile)
         cout << "Not enough RAM to sort file." << endl;
         return 2;
     }
-    cout << kIoBufSize << " bytes allocated for read buffer" << endl;
+    cout << kIoBufSize << " bytes allocated for io buffer" << endl;
 
 
     vector<string> tmpNames(256);
@@ -836,7 +864,9 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     uint32_t (*writeBuffers)[256][kWriteBufItemsSize];
     writeBuffers = (decltype(writeBuffers))buf.get();
     uint32_t addCounters[256];
+    uint64_t addCountersRes[256];
     memset(addCounters, 0, sizeof(addCounters));
+    memset(addCountersRes, 0, sizeof(addCountersRes));
 
 
     uint32_t* inputValues = (uint32_t*)ioBuf.get();
@@ -856,12 +886,14 @@ int sortByCounters(const char* inputFile, const char* outputFile)
             addCounters[msByte] += 1;
             if (addCounters[msByte] == kWriteBufItemsSize) {
                 streams[msByte].write((char*)(*writeBuffers)[msByte], sizeof(uint32_t) * addCounters[msByte]);
+                addCountersRes[msByte] += addCounters[msByte];
                 addCounters[msByte] = 0;
             }
         }
     }
     for (uint32_t msByte = 0; msByte < 256u; msByte++) {
         streams[msByte].write((char*)(*writeBuffers)[msByte], sizeof(uint32_t) * addCounters[msByte]);
+        addCountersRes[msByte] += addCounters[msByte];
     }
     for (size_t i = 0; i < tmpNames.size(); i++) {
         streams[i].close();
@@ -870,11 +902,22 @@ int sortByCounters(const char* inputFile, const char* outputFile)
     chrono::steady_clock::time_point endSplit = chrono::steady_clock::now();
 
 
+    constexpr size_t kSortCount = kMegabyte * 4;
+    constexpr size_t kSortBufSize =  kSortCount * sizeof(uint32_t);
+    unique_ptr<char[]> sortBuf = allocateMaxBuffer(kSortBufSize, kSortBufSize,  &tmp);
+    if (!ioBuf) {
+        cout << "Not enough RAM to sort file." << endl;
+        return 2;
+    }
+    cout << kIoBufSize << " bytes allocated for read buffer" << endl;
 
     ofstream out(outputFile, ios_base::binary | ios_base::out | ios_base::trunc);
     memset(buf.get(), 0, kBufSize);
     for (size_t i = 0; i < tmpNames.size(); i++) {
-        countAndWrite(out, tmpNames[i], i, buf.get(), ioBuf.get(), kIoBufSize);
+        if (addCountersRes[i] > kSortCount)
+            countAndWrite(out, tmpNames[i], i, buf.get(), ioBuf.get(), kIoBufSize);
+        else
+            sortAndWrite(out, tmpNames[i], i, sortBuf.get(), kSortBufSize);
     }
 
     out.close();
@@ -900,7 +943,7 @@ int sortByCounters(const char* inputFile, const char* outputFile)
 
 int main()
 {
-    int res = sortByCounters("input", "output");
-    //int res = sortFileStepByStep("input", "output_res", 112*kMegabyte, 4, 1024);
+    int res = sortByBuckets("input", "output");
+    //int res = sortFileIn2Steps("input", "output_res", 8*kMegabyte, 1);
     return res;
 }
