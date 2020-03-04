@@ -902,14 +902,14 @@ int sortByBuckets(const char* inputFile, const char* outputFile)
     chrono::steady_clock::time_point endSplit = chrono::steady_clock::now();
 
 
-    constexpr size_t kSortCount = kMegabyte * 4;
+    constexpr size_t kSortCount = kMegabyte*4;
     constexpr size_t kSortBufSize =  kSortCount * sizeof(uint32_t);
     unique_ptr<char[]> sortBuf = allocateMaxBuffer(kSortBufSize, kSortBufSize,  &tmp);
-    if (!ioBuf) {
+    if (!sortBuf) {
         cout << "Not enough RAM to sort file." << endl;
         return 2;
     }
-    cout << kIoBufSize << " bytes allocated for read buffer" << endl;
+    cout << kSortBufSize << " bytes allocated for read buffer" << endl;
 
     ofstream out(outputFile, ios_base::binary | ios_base::out | ios_base::trunc);
     memset(buf.get(), 0, kBufSize);
@@ -944,6 +944,6 @@ int sortByBuckets(const char* inputFile, const char* outputFile)
 int main()
 {
     int res = sortByBuckets("input", "output");
-    //int res = sortFileIn2Steps("input", "output_res", 8*kMegabyte, 1);
+    //int res = sortFileStepByStep("input", "output_res", 112*kMegabyte, 2, 1024);
     return res;
 }
