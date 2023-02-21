@@ -4,7 +4,6 @@
 #include <list>
 #include <iostream>
 #include <memory>
-#include <mutex>
 #include <vector>
 #include <thread>
 
@@ -56,7 +55,7 @@ string genUniqueFilename() {
 
     static  atomic_uint_fast32_t chunkNum;
     char buf[25];
-    sprintf(buf, ".tmp.chunk.%lu", chunkNum.fetch_add(1));
+    sprintf(buf, ".tmp.chunk.%u", chunkNum.fetch_add(1));
     string name(buf);
     return name;
 }
@@ -684,8 +683,54 @@ int sortFileStepByStep(const char* inputFile, const char* outputFile,
 }
 
 
+int justQuickSort(const char* inputFile, const char* outputFile)
+{
+    chrono::steady_clock::time_point start = chrono::steady_clock::now();
+
+    auto rf = fopen(inputFile, "rb");
+    const int bsize = 32*1024;
+    uint32_t buf[bsize];
+    vector<uint32_t> vec;
+    vec.reserve(1024*1024*1024);
+    while (!feof(rf)) {
+        int r = fread(buf, sizeof(uint32_t), bsize, rf);
+        vec.insert(vec.end(), buf, buf + r);
+    }
+    fclose(rf);
+
+    sort(vec.begin(), vec.end());
+
+    auto wf = fopen(outputFile, "wb");
+    fwrite(vec.data(), sizeof(uint32_t), vec.size(), wf);
+    fclose(wf);
+
+    chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+    auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
+
+    cout << "Sorting took "
+         << sortDurationMs
+         << "ms." << endl;
+
+    return 0;
+}
+
+
+
+
 int main()
 {
-    int res = sortFileStepByStep("input", "output_res", kMegabyte*64, 4, 1024);
+    //int res = sortFileStepByStep("../input", "output_res", kMegabyte*64, 4, 1024);
+    int res = justQuickSort("../input", "output_res");
     return res;
 }
+
+/*
+ * sortFileStepByStep("../input", "output_res", kMegabyte*64, 4, 1024);
+Sorting took 80840ms.
+*/
+
+
+/*
+ * justQuickSort("../input", "output_res");
+ * Sorting took 92780ms.
+ */
