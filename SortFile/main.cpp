@@ -714,13 +714,313 @@ int justQuickSort(const char* inputFile, const char* outputFile)
     return 0;
 }
 
+uint8_t f0(uint32_t val)
+{
+    return val & 0xffu;
+}
+
+uint8_t f1(uint32_t val)
+{
+    return (val >> 8) & 0xffu;
+}
+
+uint8_t f2(uint32_t val)
+{
+    return (val >> 16) & 0xffu;
+}
+
+uint8_t f3(uint32_t val)
+{
+    return (val >> 24) & 0xffu;
+}
+
+void radixSort(uint32_t* start, uint32_t* end, uint8_t(f)(uint32_t val), uint32_t* out)
+{
+    int64_t count[256] = {};
+
+    uint32_t *val = start;
+    while (val < end) {
+        ++count[f(*val)];
+        ++val;
+    }
+
+    int64_t sum = 0;
+    for (int i = 0; i < 256; ++i) {
+        auto t = count[i];
+        count[i] = sum;
+        sum += t;
+    }
+
+    auto size = end - start;
+    for (int i = 0; i < size; ++i)
+    {
+        auto pos = f(start[i]);
+        out[count[pos]] = start[i];
+        ++count[pos];
+    }
+}
+
+
+typedef uint8_t(*rf)(uint32_t);
+
+rf ff[] = {f3, f2, f1, f0};
+
+#include <numeric>
+
+void radixSortSpec(uint32_t* start, uint32_t* end, int level, uint32_t* out)
+{
+    int64_t count[256] = {};
+
+    auto f = ff[level];
+
+    uint32_t *val = start;
+    while (val < end) {
+        ++count[f(*val)];
+        ++val;
+    }
+
+    int64_t sum = 0;
+    for (int i = 0; i < 256; ++i) {
+        auto t = count[i];
+        count[i] = sum;
+        sum += t;
+    }
+
+    auto size = end - start;
+    for (int i = 0; i < size; ++i)
+    {
+        auto pos = f(start[i]);
+        out[count[pos]] = start[i];
+        ++count[pos];
+    }
+
+    level += 1;
+    if (level > 3)
+        return;
+
+    if (level == 1)
+    {
+        int64_t pos = 0;
+        std::thread t2([pos, count, level](uint32_t* start, uint32_t* out){
+            int64_t pos2 = pos;
+            for (int i = 0; i < 64; ++i)
+            {
+                radixSortSpec(out + pos2, out + count[i], level, start + pos2);
+                pos2 = count[i];
+            }
+        }, start, out);
+
+        pos = count[63];
+        std::thread t3([pos, count, level](uint32_t* start, uint32_t* out){
+            int64_t pos2 = pos;
+            for (int i = 64; i < 128; ++i)
+            {
+                radixSortSpec(out + pos2, out + count[i], level, start + pos2);
+                pos2 = count[i];
+            }
+        }, start, out);
+
+        pos = count[127];
+        std::thread t4([pos, count, level](uint32_t* start, uint32_t* out){
+            int64_t pos2 = pos;
+            for (int i = 128; i < 192; ++i)
+            {
+                radixSortSpec(out + pos2, out + count[i], level, start + pos2);
+                pos2 = count[i];
+            }
+        }, start, out);
+
+        pos = count[191];
+        for (int i = 192; i < 256; ++i)
+        {
+            radixSortSpec(out + pos, out + count[i], level, start + pos);
+            pos = count[i];
+        }
+
+        t2.join();
+        t3.join();
+        t4.join();
+    }
+    else {
+        int64_t pos = 0;
+        for (int i = 0; i < 256; ++i) {
+            radixSortSpec(out + pos, out + count[i], level, start + pos);
+            pos = count[i];
+        }
+    }
+}
+
+void radixSortSpecInPlace(uint32_t* start, uint32_t* end, int level)
+{
+    int64_t count[256] = {};
+
+    auto f = ff[level];
+
+    uint32_t *val = start;
+    while (val < end) {
+        ++count[f(*val)];
+        ++val;
+    }
+
+    int64_t sum = 0;
+    for (int i = 0; i < 256; ++i) {
+        auto t = count[i];
+        count[i] = sum;
+        sum += t;
+    }
+    int64_t count2[256];
+    for (int i = 0; i < 255; ++i) {
+        count2[i] = count[i+1];
+    }
+    count2[255] = count[255];
+
+    auto size = end - start;
+    for (int i = 0; i < size; ++i)
+    {
+        auto countPos = f(start[i]);
+        if (count[countPos] == count2[countPos])
+            continue;
+        while(true)
+        {
+            auto new_pos = count[f(start[i])];
+            if (new_pos == i)
+            {
+                ++count[f(start[i])];
+                break;
+            }
+            swap(start[i], start[new_pos]);
+            ++count[f(start[new_pos])];
+        }
+    }
+
+    level += 1;
+    if (level > 0)
+        return;
+
+    int64_t pos = 0;
+    for (int i = 0; i < 256; ++i) {
+        radixSortSpecInPlace(start + pos, start + count[i], level);
+        pos = count[i];
+    }
+}
+
+
+
+int radixSort(const char* inputFile, const char* outputFile)
+{
+    chrono::steady_clock::time_point start = chrono::steady_clock::now();
+
+    auto rf = fopen(inputFile, "rb");
+    const int bsize = 32*1024;
+    uint32_t buf[bsize];
+    vector<uint32_t> vec;
+    vec.reserve(1024*1024*1024);
+    while (!feof(rf)) {
+        int r = fread(buf, sizeof(uint32_t), bsize, rf);
+        vec.insert(vec.end(), buf, buf + r);
+    }
+    fclose(rf);
+
+    vector<uint32_t> vec2;
+    vec2.resize(vec.size());
+
+    radixSort(vec.data(), vec.data() + vec.size(), f3, vec2.data());
+
+    auto wf = fopen(outputFile, "wb");
+    fwrite(vec2.data(), sizeof(uint32_t), vec2.size(), wf);
+    fclose(wf);
+
+    chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+    auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
+
+    cout << "Sorting took "
+         << sortDurationMs
+         << "ms." << endl;
+
+    return 0;
+}
+
+int radixSortSpecInPlace(const char* inputFile, const char* outputFile)
+{
+
+    auto rf = fopen(inputFile, "rb");
+    const int bsize = 32*1024;
+    uint32_t buf[bsize];
+    vector<uint32_t> vec;
+    while (!feof(rf)) {
+        int r = fread(buf, sizeof(uint32_t), bsize, rf);
+        vec.insert(vec.end(), buf, buf + r);
+    }
+    fclose(rf);
+
+
+    chrono::steady_clock::time_point start = chrono::steady_clock::now();
+
+    radixSortSpecInPlace(vec.data(), vec.data() + vec.size(), 0);
+
+    chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+    auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
+
+    cout << "Sorting took "
+         << sortDurationMs
+         << "ms." << endl;
+
+    auto wf = fopen(outputFile, "wb");
+    fwrite(vec.data(), sizeof(uint32_t), vec.size(), wf);
+    fclose(wf);
+
+
+    return 0;
+}
+
+
+int radixSortSpec(const char* inputFile, const char* outputFile)
+{
+
+    auto rf = fopen(inputFile, "rb");
+    const int bsize = 32*1024;
+    uint32_t buf[bsize];
+    vector<uint32_t> vec;
+    while (!feof(rf)) {
+        int r = fread(buf, sizeof(uint32_t), bsize, rf);
+        vec.insert(vec.end(), buf, buf + r);
+    }
+    fclose(rf);
+
+
+    vector<uint32_t> vec2;
+    vec2.resize(vec.size());
+
+    chrono::steady_clock::time_point start = chrono::steady_clock::now();
+
+    radixSortSpec(vec.data(), vec.data() + vec.size(), 0, vec2.data());
+
+    chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+    auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
+
+    cout << "Sorting took "
+         << sortDurationMs
+         << "ms." << endl;
+
+    auto wf = fopen(outputFile, "wb");
+    fwrite(vec.data(), sizeof(uint32_t), vec.size(), wf);
+    fclose(wf);
+
+
+    return 0;
+}
 
 
 
 int main()
 {
     //int res = sortFileStepByStep("../input", "output_res", kMegabyte*64, 4, 1024);
-    int res = justQuickSort("../input", "output_res");
+
+    //vector<uint32_t> vec = {11, 5, 5, 0, 1, 1, 0, 2, 0, 10, 0};
+    //radixSortSpecInPlace(vec.data(), vec.data() + vec.size(), 3);
+    //return 0;
+
+    int res = radixSortSpec("../input", "output_res");
     return res;
 }
 
@@ -733,4 +1033,16 @@ Sorting took 80840ms.
 /*
  * justQuickSort("../input", "output_res");
  * Sorting took 92780ms.
+ */
+
+/*
+ * radixSortSpec("../input", "output_res");
+ * 1 thread
+ * Sorting took 25716ms.
+ *
+ * 2 threads
+ * Sorting took 22510ms.
+ *
+ * 4 threads
+ * Sorting took 10562ms. (+9 sec IO)
  */
