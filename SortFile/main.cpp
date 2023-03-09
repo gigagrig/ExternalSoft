@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 #include <thread>
+#include <mutex>
 
 
 using namespace std;
@@ -55,7 +56,7 @@ string genUniqueFilename() {
 
     static  atomic_uint_fast32_t chunkNum;
     char buf[25];
-    sprintf(buf, ".tmp.chunk.%u", chunkNum.fetch_add(1));
+    sprintf(buf, ".tmp.chunk.%lu", chunkNum.fetch_add(1));
     string name(buf);
     return name;
 }
@@ -700,11 +701,12 @@ int justQuickSort(const char* inputFile, const char* outputFile)
 
     sort(vec.begin(), vec.end());
 
+    chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+
     auto wf = fopen(outputFile, "wb");
     fwrite(vec.data(), sizeof(uint32_t), vec.size(), wf);
     fclose(wf);
 
-    chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
     auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
 
     cout << "Sorting took "
@@ -976,7 +978,6 @@ int radixSortSpecInPlace(const char* inputFile, const char* outputFile)
 
 int radixSortSpec(const char* inputFile, const char* outputFile)
 {
-
     auto rf = fopen(inputFile, "rb");
     const int bsize = 32*1024;
     uint32_t buf[bsize];
@@ -987,13 +988,73 @@ int radixSortSpec(const char* inputFile, const char* outputFile)
     }
     fclose(rf);
 
+    chrono::steady_clock::time_point start = chrono::steady_clock::now();
 
     vector<uint32_t> vec2;
     vec2.resize(vec.size());
 
+    radixSortSpec(vec.data(), vec.data() + vec.size(), 0, vec2.data());
+
+    chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+    auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
+
+    auto wf = fopen(outputFile, "wb");
+    fwrite(vec.data(), sizeof(uint32_t), vec.size(), wf);
+    fclose(wf);
+
+    cout << "Sorting took "
+         << sortDurationMs
+         << "ms." << endl;
+    return 0;
+}
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <cstring>
+#include <unistd.h>
+int qSortMmap(const char* inputFile, const char* outputFile)
+{
+    auto rf = open(inputFile, O_RDONLY);
+
+    if (rf < 0)
+    {
+        printf("input open error\n");
+        return -1;
+    }
+
+    auto of = open(outputFile, O_RDWR | O_CREAT | O_TRUNC, 0644);
+
+    if (of < 0)
+    {
+        printf("output open error\n");
+        return -1;
+    }
+
+    const int count = 1024*1024*256;
+
+    void* src = mmap(0, count*4, PROT_READ, MAP_SHARED, rf, 0);
+
+    if (src == MAP_FAILED)
+    {
+        printf("input mmap error %i\n", errno);
+        return -2;
+    }
+
+    void* dst = mmap(0, count*4, PROT_READ | PROT_WRITE, MAP_SHARED, of, 0);
+
+    if (dst == MAP_FAILED)
+    {
+        printf("output mmap error %i\n", errno);
+        return -2;
+    }
+    ftruncate(of, count*4);
+
+
     chrono::steady_clock::time_point start = chrono::steady_clock::now();
 
-    radixSortSpec(vec.data(), vec.data() + vec.size(), 0, vec2.data());
+    memcpy(dst, src, count*4);
+
+    sort((uint32_t*)dst, (uint32_t*)dst + count);
 
     chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
     auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
@@ -1002,15 +1063,43 @@ int radixSortSpec(const char* inputFile, const char* outputFile)
          << sortDurationMs
          << "ms." << endl;
 
-    auto wf = fopen(outputFile, "wb");
-    fwrite(vec.data(), sizeof(uint32_t), vec.size(), wf);
-    fclose(wf);
-
-
     return 0;
 }
 
 
+int qSortMmap(const char* inputFile)
+{
+    auto rf = open(inputFile, O_RDWR);
+
+    if (rf < 0)
+    {
+        printf("input open error\n");
+        return -1;
+    }
+
+    const int count = 1024*1024*256;
+
+    void* src = mmap(0, count*4, PROT_READ | PROT_WRITE, MAP_SHARED, rf, 0);
+
+    if (src == MAP_FAILED)
+    {
+        printf("input mmap error %i\n", errno);
+        return -2;
+    }
+
+    chrono::steady_clock::time_point start = chrono::steady_clock::now();
+
+    sort((uint32_t*)src, (uint32_t*)src + count);
+
+    chrono::steady_clock::time_point endSort = chrono::steady_clock::now();
+    auto sortDurationMs = chrono::duration_cast<chrono::milliseconds>(endSort - start).count();
+
+    cout << "Sorting took "
+         << sortDurationMs
+         << "ms." << endl;
+
+    return 0;
+}
 
 int main()
 {
@@ -1020,7 +1109,9 @@ int main()
     //radixSortSpecInPlace(vec.data(), vec.data() + vec.size(), 3);
     //return 0;
 
-    int res = radixSortSpec("../input", "output_res");
+    //int res = radixSortSpec("../input", "output_res");
+    //int res = justQuickSort("../input", "output_res");
+    int res = qSortMmap("../input");
     return res;
 }
 
@@ -1046,3 +1137,14 @@ Sorting took 80840ms.
  * 4 threads
  * Sorting took 10562ms. (+9 sec IO)
  */
+
+
+/*
+ *  int res = justQuickSort("../input", "output_res");
+ *  Sorting took 92023ms. - pure sort
+ *
+ */
+
+
+//Sorting took 25307ms. qSortMmap
+//Sorting took 21837ms. justQuickSort
